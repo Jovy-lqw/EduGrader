@@ -35,7 +35,6 @@ import {
   createRubricFromTemplate,
   loadCustomRubricTemplates,
   removeCustomRubricTemplate,
-  rubricTemplates,
   upsertCustomRubricTemplate,
 } from "./rubricTemplates";
 import type {
@@ -76,6 +75,7 @@ function App() {
   });
   const [jobs, setJobs] = useState<Job[]>([]);
   const [selectedJobId, setSelectedJobId] = useState("");
+  const selectedJobIdRef = useRef("");
   const [notice, setNotice] = useState("");
   const [jobTemplate, setJobTemplate] = useState<JobTemplate | null>(null);
 
@@ -90,8 +90,9 @@ function App() {
   const refreshJobs = useCallback(async () => {
     try {
       const next = await api.getJobs();
-      const nextSelectedId = next.some((job) => job.id === selectedJobId)
-        ? selectedJobId
+      const currentSelectedId = selectedJobIdRef.current;
+      const nextSelectedId = next.some((job) => job.id === currentSelectedId)
+        ? currentSelectedId
         : next[0]?.id || "";
       if (nextSelectedId) {
         const detail = await api.getJob(nextSelectedId);
@@ -99,11 +100,25 @@ function App() {
       } else {
         setJobs(next);
       }
+      selectedJobIdRef.current = nextSelectedId;
       setSelectedJobId(nextSelectedId);
     } catch (error) {
       setNotice(errorMessage(error));
     }
-  }, [selectedJobId]);
+  }, []);
+
+  const selectJob = useCallback(async (jobId: string) => {
+    selectedJobIdRef.current = jobId;
+    setSelectedJobId(jobId);
+    try {
+      const detail = await api.getJob(jobId);
+      setJobs((current) => current.map(
+        (job) => job.id === detail.id ? detail : job,
+      ));
+    } catch (error) {
+      setNotice(errorMessage(error));
+    }
+  }, []);
 
   useEffect(() => {
     void Promise.all([
@@ -132,6 +147,7 @@ function App() {
   };
 
   const handleJobCreated = (job: Job) => {
+    selectedJobIdRef.current = job.id;
     setSelectedJobId(job.id);
     setView("jobs");
     void refreshJobs();
@@ -189,7 +205,7 @@ function App() {
           <JobsView
             jobs={jobs}
             selectedJob={selectedJob}
-            onSelect={setSelectedJobId}
+            onSelect={(jobId) => void selectJob(jobId)}
             onRefresh={refreshJobs}
             onReuseJob={(job) => {
               setJobTemplate({
@@ -349,8 +365,8 @@ function NewJobView(props: {
   const [customRubricTemplates, setCustomRubricTemplates] = useState(
     loadCustomRubricTemplates,
   );
-  const [rubricTemplateId, setRubricTemplateId] = useState(
-    rubricTemplates[0].id,
+  const [rubricTemplateId, setRubricTemplateId] = useState(() =>
+    customRubricTemplates[0]?.id ?? ""
   );
   const [showTemplateSave, setShowTemplateSave] = useState(false);
   const [templateName, setTemplateName] = useState("");
@@ -380,10 +396,7 @@ function NewJobView(props: {
   const selectedCourse = courses.find((course) => course.id === courseId);
   const selectedHomework = homeworks.find((homework) => homework.id === homeworkId);
   const isRerun = Boolean(props.jobTemplate?.rerunFromJobId);
-  const availableRubricTemplates = useMemo(
-    () => [...rubricTemplates, ...customRubricTemplates],
-    [customRubricTemplates],
-  );
+  const availableRubricTemplates = customRubricTemplates;
   const selectedRubricTemplate = availableRubricTemplates.find(
     (template) => template.id === rubricTemplateId,
   );
@@ -570,7 +583,7 @@ function NewJobView(props: {
   };
 
   const editRubricTemplate = () => {
-    if (!selectedRubricTemplate || selectedRubricTemplate.builtIn) return;
+    if (!selectedRubricTemplate) return;
     const result = createRubricFromTemplate(selectedRubricTemplate);
     setRubric(result);
     setRubricText(result.source_text);
@@ -609,15 +622,14 @@ function NewJobView(props: {
   };
 
   const deleteRubricTemplate = () => {
-    if (!selectedRubricTemplate || selectedRubricTemplate.builtIn) return;
+    if (!selectedRubricTemplate) return;
     try {
-      setCustomRubricTemplates(
-        removeCustomRubricTemplate(
-          customRubricTemplates,
-          selectedRubricTemplate.id,
-        ),
+      const nextTemplates = removeCustomRubricTemplate(
+        customRubricTemplates,
+        selectedRubricTemplate.id,
       );
-      setRubricTemplateId(rubricTemplates[0].id);
+      setCustomRubricTemplates(nextTemplates);
+      setRubricTemplateId(nextTemplates[0]?.id ?? "");
       setEditingTemplateId("");
       setPendingTemplateDelete(false);
     } catch (error) {
@@ -810,9 +822,7 @@ function NewJobView(props: {
                     placeholder="尚未选择模板"
                     options={availableRubricTemplates.map((template) => ({
                       value: template.id,
-                      label: template.builtIn
-                        ? template.label
-                        : `自定义 · ${template.label}`,
+                      label: `自定义 · ${template.label}`,
                     }))}
                     onChange={(value) => {
                       setRubricTemplateId(value);
@@ -854,7 +864,7 @@ function NewJobView(props: {
                   <Save size={16} />
                   保存为模板
                 </button>
-                {selectedRubricTemplate && !selectedRubricTemplate.builtIn && (
+                {selectedRubricTemplate && (
                   <>
                     <button
                       className="secondary-button"
@@ -971,6 +981,12 @@ function NewJobView(props: {
                 value={rubricText}
                 placeholder="粘贴评分细则，或导入 PDF、DOCX、TXT、MD 文件"
                 onChange={(event) => setRubricText(event.target.value)}
+                onKeyDown={(event) => {
+                  if (event.ctrlKey && event.key.toLowerCase() === "a") {
+                    event.preventDefault();
+                    event.currentTarget.select();
+                  }
+                }}
               />
               {rubricFileName && (
                 <span className="rubric-file-status">
