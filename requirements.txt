@@ -1,0 +1,14 @@
+fastapi==0.115.6
+httpx==0.28.1
+playwright==1.49.1
+pydantic==2.10.4
+pydantic-settings==2.7.0
+pypdf==5.1.0
+python-multipart==0.0.20
+SQLAlchemy==2.0.36
+uvicorn[standard]==0.34.0
+
+# Optional OCR path. The local tesseract binary is also required.
+PyMuPDF==1.25.1
+pytesseract==0.3.13
+Pillow==11.0.0
