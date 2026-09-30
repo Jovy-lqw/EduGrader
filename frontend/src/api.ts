@@ -85,6 +85,10 @@ export const api = {
   getJobs: () => request<Job[]>("/api/jobs"),
   getJob: (jobId: string) =>
     request<Job>(`/api/jobs/${encodeURIComponent(jobId)}`),
+  deleteJob: (jobId: string) =>
+    request<{ message: string }>(`/api/jobs/${encodeURIComponent(jobId)}`, {
+      method: "DELETE",
+    }),
   createJob: (payload: {
     course_id: string;
     course_name: string;
@@ -127,12 +131,21 @@ export const api = {
       `/api/submissions/${encodeURIComponent(submissionId)}/manual-review`,
       { method: "POST" },
     ),
-  approveSubmission: (submissionId: string, grade: GradeDecision) =>
+  approveSubmission: (
+    submissionId: string,
+    grade: GradeDecision,
+    manualTotalScore?: number,
+  ) =>
     request<Submission>(
       `/api/submissions/${encodeURIComponent(submissionId)}/approve`,
       {
         method: "POST",
-        body: JSON.stringify({ grade }),
+        body: JSON.stringify({
+          grade,
+          ...(manualTotalScore === undefined
+            ? {}
+            : { manual_total_score: manualTotalScore }),
+        }),
       },
     ),
   rejectSubmission: (submissionId: string) =>

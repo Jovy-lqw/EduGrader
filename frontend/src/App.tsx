@@ -218,6 +218,7 @@ function App() {
               setNotice("已带入原任务，请修改评分细则后确认重新批阅");
               setView("new");
             }}
+            onNotice={setNotice}
             onError={setNotice}
           />
         )}
@@ -355,6 +356,7 @@ function NewJobView(props: {
   const [templateName, setTemplateName] = useState("");
   const [editingTemplateId, setEditingTemplateId] = useState("");
   const [pendingTemplateDelete, setPendingTemplateDelete] = useState(false);
+  const [creatingRubric, setCreatingRubric] = useState(false);
   const [totalScore, setTotalScore] = useState(100);
   const [scope, setScope] = useState<"unreviewed" | "all">("unreviewed");
   const [humanConfirmation, setHumanConfirmation] = useState(
@@ -370,7 +372,9 @@ function NewJobView(props: {
   });
   const [pendingDeleteId, setPendingDeleteId] = useState("");
   const [showRerunConfirm, setShowRerunConfirm] = useState(false);
+  const [showStartConfirm, setShowStartConfirm] = useState(false);
   const rubricFileInput = useRef<HTMLInputElement>(null);
+  const rubricTextArea = useRef<HTMLTextAreaElement>(null);
   const preserveReusedRubric = useRef(Boolean(props.jobTemplate));
 
   const selectedCourse = courses.find((course) => course.id === courseId);
@@ -382,6 +386,14 @@ function NewJobView(props: {
   );
   const selectedRubricTemplate = availableRubricTemplates.find(
     (template) => template.id === rubricTemplateId,
+  );
+  const templateMismatch = Boolean(
+    selectedHomework
+    && selectedRubricTemplate
+    && rubricContextKey(selectedHomework.title)
+    && rubricContextKey(selectedRubricTemplate.label)
+    && rubricContextKey(selectedHomework.title)
+      !== rubricContextKey(selectedRubricTemplate.label)
   );
 
   useEffect(() => {
@@ -401,9 +413,11 @@ function NewJobView(props: {
       setScope("all");
     }
     setShowRerunConfirm(false);
+    setShowStartConfirm(false);
     setShowTemplateSave(false);
     setEditingTemplateId("");
     setPendingTemplateDelete(false);
+    setCreatingRubric(false);
     setEditingCriterionId("");
     setPendingDeleteId("");
   }, [props.jobTemplate?.version]);
@@ -462,9 +476,27 @@ function NewJobView(props: {
     if (selectedHomework.total_score !== null) {
       setTotalScore(Number(selectedHomework.total_score));
     }
+    const recommendedTemplateId = recommendRubricTemplate(
+      selectedHomework.title,
+      availableRubricTemplates,
+    );
+    if (recommendedTemplateId) setRubricTemplateId(recommendedTemplateId);
     setRubric(null);
+    setCreatingRubric(false);
     setEditingCriterionId("");
     setPendingDeleteId("");
+    setBusy("homework-detail");
+    api.getHomework(courseId, selectedHomework.id)
+      .then((detail) => {
+        setHomeworks((current) => current.map(
+          (item) => item.id === detail.id ? detail : item,
+        ));
+        if (detail.total_score !== null) {
+          setTotalScore(Number(detail.total_score));
+        }
+      })
+      .catch((error) => props.onError(errorMessage(error)))
+      .finally(() => setBusy(""));
   }, [homeworkId]);
 
   const normalize = async () => {
@@ -480,6 +512,7 @@ function NewJobView(props: {
         platformCriteria,
       );
       setRubric(result);
+      setCreatingRubric(false);
       setEditingCriterionId("");
       setPendingDeleteId("");
     } catch (error) {
@@ -496,6 +529,7 @@ function NewJobView(props: {
       setRubricText(result.text);
       setRubricFileName(result.filename);
       setRubric(null);
+      setCreatingRubric(true);
       setEditingCriterionId("");
       setPendingDeleteId("");
     } catch (error) {
@@ -515,6 +549,7 @@ function NewJobView(props: {
     setShowTemplateSave(false);
     setEditingTemplateId("");
     setPendingTemplateDelete(false);
+    setCreatingRubric(false);
     setEditingCriterionId("");
     setPendingDeleteId("");
   };
@@ -528,8 +563,10 @@ function NewJobView(props: {
     setTemplateName("");
     setEditingTemplateId("");
     setPendingTemplateDelete(false);
+    setCreatingRubric(true);
     setEditingCriterionId("");
     setPendingDeleteId("");
+    window.requestAnimationFrame(() => rubricTextArea.current?.focus());
   };
 
   const editRubricTemplate = () => {
@@ -543,6 +580,7 @@ function NewJobView(props: {
     setEditingTemplateId(selectedRubricTemplate.id);
     setShowTemplateSave(true);
     setPendingTemplateDelete(false);
+    setCreatingRubric(false);
     setEditingCriterionId("");
     setPendingDeleteId("");
   };
@@ -564,6 +602,7 @@ function NewJobView(props: {
       setShowTemplateSave(false);
       setEditingTemplateId("");
       setPendingTemplateDelete(false);
+      setCreatingRubric(false);
     } catch (error) {
       props.onError(`保存评分模板失败：${errorMessage(error)}`);
     }
@@ -613,12 +652,17 @@ function NewJobView(props: {
     } finally {
       setBusy("");
       setShowRerunConfirm(false);
+      setShowStartConfirm(false);
     }
   };
 
   const requestStart = () => {
     if (isRerun && writeEnabled) {
       setShowRerunConfirm(true);
+      return;
+    }
+    if (writeEnabled) {
+      setShowStartConfirm(true);
       return;
     }
     void createAndStart();
@@ -754,49 +798,51 @@ function NewJobView(props: {
           <div className="rubric-source">
             <label>
               <span>作业总分</span>
-              <input type="number" min="1" step="0.5" value={totalScore} onChange={(event) => setTotalScore(Number(event.target.value))} />
+              <input type="number" min="1" step="1" value={totalScore} onChange={(event) => setTotalScore(Number(event.target.value))} />
             </label>
             <div className="rubric-template-picker">
-              <label>
-                <span>评分模板</span>
-                <CompactSelect
-                  ariaLabel="评分模板"
-                  value={rubricTemplateId}
-                  placeholder="自定义新模板"
-                  options={availableRubricTemplates.map((template) => ({
-                    value: template.id,
-                    label: template.builtIn
-                      ? template.label
-                      : `自定义 · ${template.label}`,
-                  }))}
-                  onChange={(value) => {
-                    setRubricTemplateId(value);
-                    setShowTemplateSave(false);
-                    setEditingTemplateId("");
-                    setPendingTemplateDelete(false);
-                  }}
-                />
-              </label>
-              <div className="rubric-template-actions">
+              <div className="rubric-template-selection">
+                <label>
+                  <span>评分模板</span>
+                  <CompactSelect
+                    ariaLabel="评分模板"
+                    value={rubricTemplateId}
+                    placeholder="尚未选择模板"
+                    options={availableRubricTemplates.map((template) => ({
+                      value: template.id,
+                      label: template.builtIn
+                        ? template.label
+                        : `自定义 · ${template.label}`,
+                    }))}
+                    onChange={(value) => {
+                      setRubricTemplateId(value);
+                      setShowTemplateSave(false);
+                      setEditingTemplateId("");
+                      setPendingTemplateDelete(false);
+                      setCreatingRubric(false);
+                    }}
+                  />
+                </label>
                 <button
-                  className="secondary-button"
+                  className="primary-button"
                   disabled={!selectedRubricTemplate || !!busy}
                   onClick={applyRubricTemplate}
                 >
                   <BookOpen size={16} />
-                  应用
+                  应用模板
                 </button>
+              </div>
+              <div className="rubric-template-actions">
                 <button
-                  className="icon-button bordered"
-                  title="新建自定义模板"
+                  className="secondary-button"
                   disabled={!!busy}
                   onClick={startNewRubricTemplate}
                 >
                   <Plus size={16} />
+                  新建细则
                 </button>
                 <button
-                  className="icon-button bordered"
-                  title="另存当前细则为模板"
+                  className="secondary-button"
                   disabled={!rubric || !!busy}
                   onClick={() => {
                     setTemplateName(rubric?.title || "");
@@ -806,20 +852,20 @@ function NewJobView(props: {
                   }}
                 >
                   <Save size={16} />
+                  保存为模板
                 </button>
                 {selectedRubricTemplate && !selectedRubricTemplate.builtIn && (
                   <>
                     <button
-                      className="icon-button bordered"
-                      title="修改自定义模板"
+                      className="secondary-button"
                       disabled={!!busy}
                       onClick={editRubricTemplate}
                     >
                       <Pencil size={16} />
+                      编辑模板
                     </button>
                     <button
-                      className="icon-button bordered danger-icon-button"
-                      title="删除自定义模板"
+                      className="secondary-button danger-secondary-button"
                       disabled={!!busy}
                       onClick={() => {
                         setPendingTemplateDelete(true);
@@ -828,11 +874,24 @@ function NewJobView(props: {
                       }}
                     >
                       <Trash2 size={16} />
+                      删除模板
                     </button>
                   </>
                 )}
               </div>
               <p>{selectedRubricTemplate?.summary}</p>
+              {templateMismatch && (
+                <div className="template-warning" role="alert">
+                  <CircleAlert size={15} />
+                  当前模板与所选作业阶段可能不一致，请确认后再应用。
+                </div>
+              )}
+              {creatingRubric && (
+                <div className="template-workflow-hint">
+                  <strong>新建细则</strong>
+                  <span>输入或导入评分要求，生成评分项后再保存为模板。</span>
+                </div>
+              )}
               {showTemplateSave && (
                 <div className="rubric-template-edit-row">
                   <input
@@ -907,6 +966,7 @@ function NewJobView(props: {
                 />
               </div>
               <textarea
+                ref={rubricTextArea}
                 rows={10}
                 value={rubricText}
                 placeholder="粘贴评分细则，或导入 PDF、DOCX、TXT、MD 文件"
@@ -1001,8 +1061,8 @@ function NewJobView(props: {
                       <span>分值</span>
                       <input
                         type="number"
-                        min="0.1"
-                        step="0.5"
+                        min="1"
+                        step="1"
                         value={criterionDraft.max_score}
                         onChange={(event) => setCriterionDraft((current) => ({
                           ...current,
@@ -1143,6 +1203,68 @@ function NewJobView(props: {
           </div>
         </div>
       )}
+      {showStartConfirm && selectedHomework && selectedCourse && (
+        <div
+          className="dialog-backdrop"
+          role="presentation"
+          onMouseDown={() => setShowStartConfirm(false)}
+        >
+          <div
+            className="review-dialog start-confirm-dialog"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="start-confirm-title"
+            onMouseDown={(event) => event.stopPropagation()}
+          >
+            <div className="dialog-header">
+              <div>
+                <span className="eyebrow">开始前确认</span>
+                <h2 id="start-confirm-title">确认开始批阅任务</h2>
+              </div>
+              <button
+                className="icon-button"
+                title="关闭"
+                onClick={() => setShowStartConfirm(false)}
+              >
+                <X size={18} />
+              </button>
+            </div>
+            <div className="review-body">
+              <dl className="start-confirm-summary">
+                <div><dt>课程</dt><dd>{selectedCourse.name}</dd></div>
+                <div><dt>作业</dt><dd>{selectedHomework.title}</dd></div>
+                <div><dt>评分细则</dt><dd>{rubric?.title}</dd></div>
+                <div><dt>批阅范围</dt><dd>{scope === "all" ? "全部提交" : "仅未批"}</dd></div>
+                <div><dt>人工确认</dt><dd>{humanConfirmation ? "开启" : "关闭"}</dd></div>
+              </dl>
+              <p className="detail-warning">
+                {props.config.adapter_mode === "mock"
+                  ? "当前为本地演示模式，不会连接或修改智慧树数据。"
+                  : "系统会在运行前再次确认自动发布已关闭，并且只写入未发布成绩。"}
+                {humanConfirmation
+                  ? "每份评分仍需人工确认。"
+                  : "评分通过后将自动写入，请确认配置无误。"}
+              </p>
+            </div>
+            <div className="dialog-footer">
+              <button
+                className="secondary-button"
+                onClick={() => setShowStartConfirm(false)}
+              >
+                返回检查
+              </button>
+              <button
+                className="primary-button"
+                disabled={!!busy}
+                onClick={() => void createAndStart()}
+              >
+                <Play size={16} fill="currentColor" />
+                确认并开始
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
@@ -1154,6 +1276,7 @@ function JobsView(props: {
   onRefresh: () => Promise<void>;
   onReuseJob: (job: Job) => void;
   onRerunJob: (job: Job) => void;
+  onNotice: (message: string) => void;
   onError: (message: string) => void;
 }) {
   const [reviewing, setReviewing] = useState<Submission | null>(null);
@@ -1163,6 +1286,8 @@ function JobsView(props: {
   const [showIncompleteOnly, setShowIncompleteOnly] = useState(false);
   const [preparingManualReview, setPreparingManualReview] = useState("");
   const [updatingConflictOverwrite, setUpdatingConflictOverwrite] = useState(false);
+  const [pendingDeleteJob, setPendingDeleteJob] = useState<Job | null>(null);
+  const [deletingJob, setDeletingJob] = useState(false);
   const skippedReasons = useMemo(() => {
     const counts = new Map<string, number>();
     for (const submission of props.selectedJob?.submissions ?? []) {
@@ -1263,6 +1388,20 @@ function JobsView(props: {
       setUpdatingConflictOverwrite(false);
     }
   };
+  const deleteJob = async () => {
+    if (!pendingDeleteJob) return;
+    setDeletingJob(true);
+    try {
+      const result = await api.deleteJob(pendingDeleteJob.id);
+      setPendingDeleteJob(null);
+      props.onNotice(result.message);
+      await props.onRefresh();
+    } catch (error) {
+      props.onError(errorMessage(error));
+    } finally {
+      setDeletingJob(false);
+    }
+  };
   const openManualReview = async (
     submission: Submission,
     reportOpen: boolean,
@@ -1342,6 +1481,14 @@ function JobsView(props: {
                   ) && (
                     <button className="secondary-button" onClick={() => props.onRerunJob(props.selectedJob!)}>
                       <RotateCcw size={16} />修改后重批
+                    </button>
+                  )}
+                  {!activeJobStatuses.has(props.selectedJob.status) && (
+                    <button
+                      className="secondary-button danger-secondary-button"
+                      onClick={() => setPendingDeleteJob(props.selectedJob!)}
+                    >
+                      <Trash2 size={16} />删除任务
                     </button>
                   )}
                   {props.selectedJob.review_count > 0 && (
@@ -1570,6 +1717,7 @@ function JobsView(props: {
           rubric={props.selectedJob.rubric}
           courseName={props.selectedJob.course_name}
           homeworkTitle={props.selectedJob.homework_title}
+          writeEnabled={props.selectedJob.write_enabled}
           modelReview={reviewing.grade.needs_review === true}
           manualReview={reviewing.status_message.startsWith("已转为手工评分")}
           initialReportOpen={openReportOnReview}
@@ -1591,6 +1739,64 @@ function JobsView(props: {
           onClose={() => setShowRubric(false)}
           onReuse={() => props.onReuseJob(props.selectedJob!)}
         />
+      )}
+      {pendingDeleteJob && (
+        <div
+          className="dialog-backdrop"
+          role="presentation"
+          onMouseDown={() => {
+            if (!deletingJob) setPendingDeleteJob(null);
+          }}
+        >
+          <div
+            className="review-dialog delete-job-dialog"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="delete-job-title"
+            onMouseDown={(event) => event.stopPropagation()}
+          >
+            <div className="dialog-header">
+              <div>
+                <span className="eyebrow">删除任务记录</span>
+                <h2 id="delete-job-title">{pendingDeleteJob.homework_title}</h2>
+              </div>
+              <button
+                className="icon-button"
+                title="关闭"
+                disabled={deletingJob}
+                onClick={() => setPendingDeleteJob(null)}
+              >
+                <X size={18} />
+              </button>
+            </div>
+            <div className="review-body">
+              <p className="detail-warning">
+                将永久删除该任务、学生评分记录和处理日志。智慧树中已经写入的成绩不会被撤销。
+              </p>
+              <div className="delete-job-summary">
+                <span>{pendingDeleteJob.course_name}</span>
+                <strong>{pendingDeleteJob.total_count} 名学生</strong>
+              </div>
+            </div>
+            <div className="dialog-footer">
+              <button
+                className="secondary-button"
+                disabled={deletingJob}
+                onClick={() => setPendingDeleteJob(null)}
+              >
+                取消
+              </button>
+              <button
+                className="danger-button"
+                disabled={deletingJob}
+                onClick={() => void deleteJob()}
+              >
+                <Trash2 size={16} />
+                {deletingJob ? "正在删除" : "确认删除"}
+              </button>
+            </div>
+          </div>
+        </div>
       )}
     </div>
   );
@@ -1792,6 +1998,7 @@ function ReviewDialog(props: {
   rubric: Rubric;
   courseName: string;
   homeworkTitle: string;
+  writeEnabled: boolean;
   modelReview: boolean;
   manualReview: boolean;
   initialReportOpen: boolean;
@@ -1803,35 +2010,89 @@ function ReviewDialog(props: {
     ? props.submission.grade as GradeDecision
     : null;
   const [grade, setGrade] = useState<GradeDecision | null>(initialGrade);
+  const [scoreDrafts, setScoreDrafts] = useState<Record<string, string>>(
+    () => Object.fromEntries(
+      (initialGrade?.criterion_scores ?? []).map((item) => [
+        item.criterion_id,
+        props.manualReview && Number(item.score) === 0
+          ? ""
+          : String(item.score),
+      ]),
+    ),
+  );
+  const [manualTotalDraft, setManualTotalDraft] = useState(
+    props.manualReview && Number(initialGrade?.final_score) !== 0
+      ? String(initialGrade?.final_score)
+      : "",
+  );
   const [busy, setBusy] = useState(false);
+  const [hasUnsavedChanges, setHasUnsavedChanges] = useState(false);
   const pdfFile = getPdfReportFile(props.submission);
   const [showReport, setShowReport] = useState(
     props.initialReportOpen && !!pdfFile,
   );
   const reportUrl = `/api/submissions/${encodeURIComponent(props.submission.id)}/report`;
   const canReview = props.submission.status === "waiting_confirmation";
+  const manualTotal = Number(manualTotalDraft);
   const total = useMemo(
-    () => grade?.criterion_scores.reduce((sum, item) => sum + Number(item.score), 0) ?? 0,
-    [grade],
+    () => props.manualReview
+      ? (manualTotalDraft.trim() ? Number(manualTotalDraft) : 0)
+      : grade?.criterion_scores.reduce((sum, item) => {
+        const value = scoreDrafts[item.criterion_id]?.trim();
+        return value ? sum + Number(value) : sum;
+      }, 0) ?? 0,
+    [grade, manualTotalDraft, props.manualReview, scoreDrafts],
+  );
+  const manualTotalValid = (
+    manualTotalDraft.trim() !== ""
+    && Number.isFinite(manualTotal)
+    && Number.isInteger(manualTotal)
+    && manualTotal >= 0
+    && manualTotal <= Number(props.rubric.total_score)
   );
   const scoreBandValid = (
     (props.rubric.score_bands ?? []).length === 0
     || !!findScoreBand(props.rubric, total)
   );
+  const scoreValuesValid = Boolean(
+    grade
+    && grade.criterion_scores.every((item) => {
+      const criterion = props.rubric.criteria.find(
+        (candidate) => candidate.id === item.criterion_id,
+      );
+      const value = scoreDrafts[item.criterion_id]?.trim() ?? "";
+      const score = Number(value);
+      return value !== ""
+        && Number.isFinite(score)
+        && Number.isInteger(score)
+        && score >= 0
+        && score <= Number(criterion?.max_score ?? 0);
+    })
+  );
   const canApprove = Boolean(
     grade
-    && grade.feedback.trim()
-    && total <= Number(props.rubric.total_score)
-    && scoreBandValid
+    && (
+      props.manualReview
+        ? manualTotalValid
+        : (
+          scoreValuesValid
+          && total <= Number(props.rubric.total_score)
+          && scoreBandValid
+        )
+    )
   );
   const processEvents = (props.submission.events ?? []).filter(
     (event, index, events) => index === 0 || event.message !== events[index - 1].message,
   );
 
-  const updateCriterion = (id: string, score: number) => {
+  const updateCriterion = (id: string, value: string) => {
     if (!grade) return;
+    setHasUnsavedChanges(true);
+    setScoreDrafts((current) => ({ ...current, [id]: value }));
     setGrade((current) => {
       if (!current) return current;
+      const parsedScore = value.trim() === "" ? 0 : Number(value);
+      const score = Number.isFinite(parsedScore) ? parsedScore : 0;
       const criterionScores = current.criterion_scores.map((item) =>
         item.criterion_id === id ? { ...item, score } : item
       );
@@ -1851,10 +2112,21 @@ function ReviewDialog(props: {
         detected_score_band_id: scoreBand?.id ?? "",
         detected_score_band_name: scoreBand?.name ?? "",
         score_band_evidence: scoreBandChanged && scoreBand
-          ? [`人工调整后分项合计 ${nextTotal.toFixed(1)} 分，落入该档位。`]
+          ? [`人工调整后分项合计 ${nextTotal} 分，落入该档位。`]
           : current.score_band_evidence,
       };
     });
+  };
+
+  const requestClose = () => {
+    if (
+      canReview
+      && hasUnsavedChanges
+      && !window.confirm("当前评分修改尚未写入，确定关闭吗？")
+    ) {
+      return;
+    }
+    props.onClose();
   };
 
   const approve = async () => {
@@ -1865,7 +2137,7 @@ function ReviewDialog(props: {
         ...grade,
         raw_score: total,
         final_score: total,
-      });
+      }, props.manualReview ? manualTotal : undefined);
       await props.onDone();
     } catch (error) {
       props.onError(errorMessage(error));
@@ -1887,7 +2159,7 @@ function ReviewDialog(props: {
   };
 
   return (
-    <div className="dialog-backdrop" role="presentation" onMouseDown={props.onClose}>
+    <div className="dialog-backdrop" role="presentation" onMouseDown={requestClose}>
       <div className={`review-dialog ${showReport ? "review-dialog-report-open" : ""}`} role="dialog" aria-modal="true" aria-labelledby="submission-detail-title" onMouseDown={(event) => event.stopPropagation()}>
         <div className="dialog-header">
           <div>
@@ -1912,10 +2184,10 @@ function ReviewDialog(props: {
                 {showReport ? "收起 PDF" : "查看 PDF"}
               </button>
             )}
-            <button className="icon-button" title="关闭" onClick={props.onClose}><X size={18} /></button>
+            <button className="icon-button" title="关闭" onClick={requestClose}><X size={18} /></button>
           </div>
         </div>
-        <div className={showReport ? "review-comparison" : ""}>
+        <div className={`review-dialog-content ${showReport ? "review-comparison" : ""}`}>
           {showReport && (
             <section className="report-viewer" aria-label="学生报告">
               <div className="report-viewer-header">
@@ -1948,7 +2220,33 @@ function ReviewDialog(props: {
 
           {grade ? (
             <>
-              {grade.detected_stage_name && (
+              {props.manualReview && canReview && (
+                <section className="manual-total-editor">
+                  <label htmlFor={`manual-total-${props.submission.id}`}>
+                    最终总分
+                  </label>
+                  <div>
+                    <input
+                      id={`manual-total-${props.submission.id}`}
+                      aria-label="最终总分"
+                      type="number"
+                      inputMode="numeric"
+                      min="0"
+                      max={Number(props.rubric.total_score)}
+                      step="1"
+                      value={manualTotalDraft}
+                      autoFocus
+                      onChange={(event) => {
+                        setHasUnsavedChanges(true);
+                        setManualTotalDraft(event.target.value);
+                      }}
+                    />
+                    <span>/ {props.rubric.total_score}</span>
+                  </div>
+                  <p>直接填写该学生的最终成绩，无需拆分到评分项。</p>
+                </section>
+              )}
+              {!props.manualReview && grade.detected_stage_name && (
                 <section className="detected-stage">
                   <div>
                     <span>识别阶段</span>
@@ -1959,7 +2257,7 @@ function ReviewDialog(props: {
                   )}
                 </section>
               )}
-              {grade.detected_score_band_name && (
+              {!props.manualReview && grade.detected_score_band_name && (
                 <section className="detected-stage detected-score-band">
                   <div>
                     <span>完成度分档</span>
@@ -1970,14 +2268,12 @@ function ReviewDialog(props: {
                   )}
                 </section>
               )}
-              <div className="grade-overview">
+              {!props.manualReview && <div className="grade-overview">
                 <span>原始分 <strong>{grade.raw_score}</strong></span>
                 <span>最终分 <strong>{grade.final_score}</strong></span>
-                {!props.manualReview && (
-                  <span>置信度 <strong>{Math.round(grade.confidence * 100)}%</strong></span>
-                )}
-              </div>
-              <section className="detail-section">
+                <span>置信度 <strong>{Math.round(grade.confidence * 100)}%</strong></span>
+              </div>}
+              {!props.manualReview && <section className="detail-section">
                 <h3>分项评分依据</h3>
                 {grade.criterion_scores.map((item) => {
                   const criterion = props.rubric.criteria.find((candidate) => candidate.id === item.criterion_id);
@@ -2000,8 +2296,20 @@ function ReviewDialog(props: {
                         )}
                       </div>
                       {canReview ? (
-                        <label>
-                          <input type="number" min="0" max={Number(criterion?.max_score ?? 0)} step="0.1" value={item.score} onChange={(event) => updateCriterion(item.criterion_id, Number(event.target.value))} />
+                        <label className="manual-score-field">
+                          <input
+                            aria-label={`${criterion?.name || item.criterion_id}得分`}
+                            type="number"
+                            inputMode="numeric"
+                            min="0"
+                            max={Number(criterion?.max_score ?? 0)}
+                            step="1"
+                            value={scoreDrafts[item.criterion_id] ?? ""}
+                            onChange={(event) => updateCriterion(
+                              item.criterion_id,
+                              event.target.value,
+                            )}
+                          />
                           <span>/ {criterion?.max_score}</span>
                         </label>
                       ) : (
@@ -2010,7 +2318,7 @@ function ReviewDialog(props: {
                     </div>
                   );
                 })}
-              </section>
+              </section>}
 
               {grade.review_reasons.length > 0 && (
                 <section className="detail-section detail-warning">
@@ -2025,16 +2333,21 @@ function ReviewDialog(props: {
                 </section>
               )}
               <section className="detail-section">
-                <h3>教师评语</h3>
+                <h3>教师评语 <span className="optional-label">选填</span></h3>
                 {canReview ? (
                   <textarea
-                    rows={5}
+                    rows={3}
                     value={grade.feedback}
-                    placeholder="填写人工评语"
-                    onChange={(event) => setGrade((current) => current ? { ...current, feedback: event.target.value } : current)}
+                    placeholder="可选填人工评语"
+                    onChange={(event) => {
+                      setHasUnsavedChanges(true);
+                      setGrade((current) => current
+                        ? { ...current, feedback: event.target.value }
+                        : current);
+                    }}
                   />
                 ) : (
-                  <p className="grade-feedback">{grade.feedback}</p>
+                  <p className="grade-feedback">{grade.feedback || "无"}</p>
                 )}
               </section>
             </>
@@ -2080,7 +2393,20 @@ function ReviewDialog(props: {
           </div>
         </div>
         <div className="dialog-footer">
-          {grade && <span className="review-total">总分 {total.toFixed(1)}</span>}
+          {grade && (
+            <div className="review-total-group">
+              <span className="review-total">总分 {total}</span>
+              {props.manualReview && !manualTotalValid && (
+                <small>请输入 0 至 {props.rubric.total_score} 的整数</small>
+              )}
+              {!props.manualReview && !scoreValuesValid && (
+                <small>请填写所有分项，并使用有效整数</small>
+              )}
+              {!props.manualReview && scoreValuesValid && !scoreBandValid && (
+                <small>总分不在评分细则定义的档位内</small>
+              )}
+            </div>
+          )}
           <button
             className="secondary-button"
             onClick={() => exportSubmissionRecord(
@@ -2097,22 +2423,27 @@ function ReviewDialog(props: {
             <>
               <button className="danger-button" disabled={busy} onClick={() => void reject()}>
                 {props.manualReview
-                  ? "暂不写入"
+                  ? "拒绝并标记不写入"
                   : props.modelReview
                     ? "维持跳过"
                     : "拒绝写入"}
               </button>
               <button
                 className="primary-button"
-                title={!grade?.feedback.trim()
-                  ? "请先填写人工评语"
-                  : !scoreBandValid
+                title={props.manualReview && !manualTotalValid
+                  ? `请输入 0 至 ${props.rubric.total_score} 的整数`
+                  : !props.manualReview && !scoreValuesValid
+                    ? "请填写所有分项，并使用有效整数"
+                    : !props.manualReview && !scoreBandValid
                     ? "分项总分需要落入评分细则定义的分数档位"
                     : undefined}
                 disabled={busy || !canApprove}
                 onClick={() => void approve()}
               >
-                <Check size={17} />确认写入
+                <Check size={17} />
+                {props.manualReview
+                  ? props.writeEnabled ? "确认总分并写入" : "确认总分"
+                  : props.writeEnabled ? "确认写入" : "确认评分"}
               </button>
             </>
           ) : (
@@ -2324,6 +2655,24 @@ function cloneRubric(rubric: Rubric): Rubric {
       deduction_rules: [...criterion.deduction_rules],
     })),
   };
+}
+
+function rubricContextKey(value: string): string {
+  if (/阶段二|第二阶段/.test(value)) return "stage-two";
+  if (/阶段三|第三阶段/.test(value)) return "stage-three";
+  if (/最终|大报告/.test(value)) return "final-report";
+  return "";
+}
+
+function recommendRubricTemplate(
+  homeworkTitle: string,
+  templates: Array<{ id: string; label: string }>,
+): string {
+  const contextKey = rubricContextKey(homeworkTitle);
+  if (!contextKey) return "";
+  return templates.find(
+    (template) => rubricContextKey(template.label) === contextKey,
+  )?.id ?? "";
 }
 
 function formatRubricText(rubric: Rubric) {

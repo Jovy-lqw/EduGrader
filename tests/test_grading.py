@@ -17,6 +17,7 @@ from backend.app.services.llm import (
     GradeValidationError,
     GradeValidator,
     LlmClient,
+    LlmError,
     _parse_json_object,
 )
 
@@ -308,6 +309,60 @@ class LlmClientTests(IsolatedAsyncioTestCase):
         retry_prompt = client._chat_json.await_args_list[1].args[1]
         self.assertIn("不要返回 JSON Schema 定义", retry_prompt)
 
+    async def test_normalize_restores_platform_criteria_when_model_omits_them(
+        self,
+    ) -> None:
+        client = LlmClient()
+        client._chat_json = AsyncMock(
+            return_value={
+                "title": "阶段报告评分细则",
+                "total_score": 100,
+                "criteria": [],
+            }
+        )
+        platform_criterion = RubricCriterion(
+            id="platform-total",
+            name="总评",
+            max_score=Decimal("100"),
+            platform_score_attr_id="score-attribute-1",
+        )
+
+        rubric = await client.normalize_rubric(
+            RubricNormalizeRequest(
+                source_text="按照报告完成情况评分。",
+                total_score=Decimal("100"),
+                platform_criteria=[platform_criterion],
+            )
+        )
+
+        self.assertEqual(rubric.criteria, [platform_criterion])
+        self.assertEqual(client._chat_json.await_count, 1)
+
+    async def test_normalize_reports_friendly_error_for_empty_criteria(
+        self,
+    ) -> None:
+        client = LlmClient()
+        client._chat_json = AsyncMock(
+            return_value={
+                "title": "评分细则",
+                "total_score": 100,
+                "criteria": [],
+            }
+        )
+
+        with self.assertRaisesRegex(
+            LlmError,
+            "模型未返回有效评分项",
+        ) as context:
+            await client.normalize_rubric(
+                RubricNormalizeRequest(
+                    source_text="按照完成情况评分。",
+                    total_score=Decimal("100"),
+                )
+            )
+
+        self.assertNotIn("pydantic.dev", str(context.exception))
+
     async def test_missing_confidence_uses_neutral_default(
         self,
     ) -> None:
@@ -534,7 +589,7 @@ class LlmClientTests(IsolatedAsyncioTestCase):
         self.assertIn("先依据总体要求、强制章节、全局扣分规则", prompt)
         self.assertIn("不是人数配额", prompt)
 
-    async def test_score_outside_selected_band_is_retried(self) -> None:
+    async def test_score_outside_selected_band_is_corrected_locally(self) -> None:
         client = LlmClient()
         base_response = {
             "criterion_scores": [
@@ -551,15 +606,7 @@ class LlmClientTests(IsolatedAsyncioTestCase):
             "feedback": "完成良好。",
             "confidence": 0.8,
         }
-        client._chat_json = AsyncMock(
-            side_effect=[
-                base_response,
-                {
-                    **base_response,
-                    "detected_score_band_id": "good",
-                },
-            ]
-        )
+        client._chat_json = AsyncMock(return_value=base_response)
         rubric = Rubric(
             total_score=Decimal("100"),
             criteria=[
@@ -588,9 +635,8 @@ class LlmClientTests(IsolatedAsyncioTestCase):
         decision = await client.grade(rubric, "主要任务完成。")
 
         self.assertEqual(decision.detected_score_band_id, "good")
-        self.assertEqual(client._chat_json.await_count, 2)
-        retry_prompt = client._chat_json.await_args_list[1].args[1]
-        self.assertIn("完成度分档无效", retry_prompt)
+        self.assertEqual(decision.detected_score_band_name, "完成良好")
+        self.assertEqual(client._chat_json.await_count, 1)
 
     def test_parses_json_surrounded_by_explanation(self) -> None:
         parsed = _parse_json_object(

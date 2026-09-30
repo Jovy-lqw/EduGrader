@@ -120,7 +120,7 @@ class GradeDecision(BaseModel):
     detected_score_band_id: str = ""
     detected_score_band_name: str = ""
     score_band_evidence: list[str] = Field(default_factory=list)
-    feedback: str = Field(min_length=1)
+    feedback: str = ""
     confidence: float = Field(ge=0, le=1)
     needs_review: bool = False
     review_reasons: list[str] = Field(default_factory=list)
@@ -237,6 +237,7 @@ class JobView(BaseModel):
 
 class HumanDecisionUpdate(BaseModel):
     grade: GradeDecision
+    manual_total_score: Optional[Decimal] = Field(default=None, ge=0)
 
 
 class SessionStatus(BaseModel):

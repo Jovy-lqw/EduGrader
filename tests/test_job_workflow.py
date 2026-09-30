@@ -7,7 +7,7 @@ from unittest.mock import patch
 from zipfile import ZipFile
 
 from backend.app.database import initialize_database, session_scope
-from backend.app.models import GradingJob, Submission
+from backend.app.models import AuditEvent, GradingJob, Submission
 from backend.app.schemas import (
     GradeCriterion,
     GradeDecision,
@@ -16,6 +16,7 @@ from backend.app.schemas import (
     JobScope,
     Rubric,
     RubricCriterion,
+    RubricScoreBand,
 )
 from backend.app.services.adapters import MockAdapter, RemoteSafetyError
 from backend.app.services.jobs import JobError, JobService, _submission_fingerprint
@@ -328,13 +329,194 @@ class JobWorkflowTests(IsolatedAsyncioTestCase):
                     ],
                     raw_score=Decimal("88"),
                     final_score=Decimal("88"),
-                    feedback="人工查看后给出评分。",
+                    feedback="",
                     confidence=Decimal("1"),
                 )
             ),
         )
         self.assertEqual(approved.status, "dry_run_complete")
         self.assertEqual(approved.grade["final_score"], "88.0")
+
+    async def test_manual_review_can_approve_with_total_score_only(self) -> None:
+        rubric = Rubric(
+            total_score=Decimal("100"),
+            score_bands=[
+                RubricScoreBand(
+                    id="passing",
+                    name="完成",
+                    min_score=Decimal("80"),
+                    max_score=Decimal("100"),
+                )
+            ],
+            criteria=[
+                RubricCriterion(
+                    id="content",
+                    name="内容质量",
+                    max_score=Decimal("60"),
+                ),
+                RubricCriterion(
+                    id="format",
+                    name="格式规范",
+                    max_score=Decimal("40"),
+                ),
+            ],
+        )
+        job = self.service.create(
+            JobCreate(
+                course_id="demo-course",
+                homework_id="demo-homework",
+                rubric=rubric,
+                write_enabled=False,
+            )
+        )
+        self.created_job_ids.append(job.id)
+        with session_scope() as db:
+            submission = Submission(
+                job_id=job.id,
+                student_id="manual-total",
+                status="failed",
+                status_message="解析失败",
+            )
+            db.add(submission)
+            db.flush()
+            submission_id = submission.id
+
+        prepared = await self.service.begin_manual_review(
+            submission_id,
+            MockAdapter(),
+        )
+        approved = await self.service.approve(
+            submission_id,
+            HumanDecisionUpdate(
+                grade=GradeDecision.model_validate(prepared.grade),
+                manual_total_score=Decimal("73"),
+            ),
+        )
+
+        self.assertEqual(approved.status, "dry_run_complete")
+        self.assertEqual(approved.status_message, "人工总分确认通过")
+        self.assertEqual(approved.grade["final_score"], "73")
+        self.assertEqual(approved.grade["criterion_scores"], [])
+
+    async def test_manual_total_rejects_invalid_score(self) -> None:
+        rubric = Rubric(
+            total_score=Decimal("100"),
+            criteria=[
+                RubricCriterion(
+                    id="content",
+                    name="内容质量",
+                    max_score=Decimal("100"),
+                )
+            ],
+        )
+        job = self.service.create(
+            JobCreate(
+                course_id="demo-course",
+                homework_id="demo-homework",
+                rubric=rubric,
+                write_enabled=False,
+            )
+        )
+        self.created_job_ids.append(job.id)
+        with session_scope() as db:
+            submission = Submission(
+                job_id=job.id,
+                student_id="manual-invalid-total",
+                status="waiting_confirmation",
+                status_message="已转为手工评分",
+                grade_json=json.dumps(
+                    {
+                        "criterion_scores": [
+                            {
+                                "criterion_id": "content",
+                                "score": 0,
+                            }
+                        ],
+                        "raw_score": 0,
+                        "final_score": 0,
+                        "confidence": 0,
+                    }
+                ),
+            )
+            db.add(submission)
+            db.flush()
+            submission_id = submission.id
+
+        current = self.service.get(job.id).submissions[0]
+        with self.assertRaisesRegex(JobError, "不能超过"):
+            await self.service.approve(
+                submission_id,
+                HumanDecisionUpdate(
+                    grade=GradeDecision.model_validate(current.grade),
+                    manual_total_score=Decimal("101"),
+                ),
+            )
+
+    def test_deletes_inactive_job_and_related_records(self) -> None:
+        rubric = Rubric(
+            total_score=Decimal("100"),
+            criteria=[
+                RubricCriterion(
+                    id="content",
+                    name="内容质量",
+                    max_score=Decimal("100"),
+                )
+            ],
+        )
+        job = self.service.create(
+            JobCreate(
+                course_id="demo-course",
+                homework_id="demo-homework",
+                rubric=rubric,
+            )
+        )
+        self.created_job_ids.append(job.id)
+        with session_scope() as db:
+            submission = Submission(
+                job_id=job.id,
+                student_id="delete-me",
+                status="failed",
+            )
+            db.add(submission)
+            db.flush()
+            submission_id = submission.id
+
+        self.service.delete(job.id)
+
+        with self.assertRaisesRegex(JobError, "任务不存在"):
+            self.service.get(job.id)
+        with session_scope() as db:
+            self.assertIsNone(db.get(Submission, submission_id))
+            self.assertEqual(
+                db.query(AuditEvent).filter(AuditEvent.job_id == job.id).count(),
+                0,
+            )
+        self.created_job_ids.remove(job.id)
+
+    def test_rejects_deleting_active_job(self) -> None:
+        rubric = Rubric(
+            total_score=Decimal("100"),
+            criteria=[
+                RubricCriterion(
+                    id="content",
+                    name="内容质量",
+                    max_score=Decimal("100"),
+                )
+            ],
+        )
+        job = self.service.create(
+            JobCreate(
+                course_id="demo-course",
+                homework_id="demo-homework",
+                rubric=rubric,
+            )
+        )
+        self.created_job_ids.append(job.id)
+        with session_scope() as db:
+            db.get(GradingJob, job.id).status = "running"
+
+        with self.assertRaisesRegex(JobError, "先暂停"):
+            self.service.delete(job.id)
 
     async def test_manual_review_requires_inactive_job(self) -> None:
         rubric = Rubric(

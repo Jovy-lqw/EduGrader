@@ -274,6 +274,18 @@ class JobService:
                 events_by_submission=events_by_submission,
             )
 
+    def delete(self, job_id: str) -> None:
+        task = self._tasks.get(job_id)
+        if task and not task.done():
+            raise JobError("任务仍在运行，请先暂停后再删除")
+        with session_scope() as db:
+            job = db.get(GradingJob, job_id)
+            if not job:
+                raise JobError("任务不存在")
+            if job.status in ACTIVE_JOB_STATUSES:
+                raise JobError("任务仍在运行，请先暂停后再删除")
+            db.delete(job)
+
     async def get_report_pdf(
         self,
         submission_id: str,
@@ -559,17 +571,32 @@ class JobService:
             if submission.status != "waiting_confirmation":
                 raise JobError("该记录当前不等待人工确认")
             rubric = Rubric.model_validate_json(job.rubric_json)
-            decision = grade_validator.validate_and_adjust(
-                update.grade,
-                rubric,
-                is_delay=_json_load(submission.snapshot_json).get("is_delay", False),
-                is_resubmission=bool(
-                    _json_load(submission.snapshot_json).get("redo", False)
-                ),
-            )
+            if update.manual_total_score is not None:
+                if not submission.status_message.startswith("已转为手工评分"):
+                    raise JobError("仅手工评分记录可以直接填写总分")
+                decision = _manual_total_decision(
+                    update.grade,
+                    rubric,
+                    update.manual_total_score,
+                )
+            else:
+                decision = grade_validator.validate_and_adjust(
+                    update.grade,
+                    rubric,
+                    is_delay=_json_load(submission.snapshot_json).get(
+                        "is_delay", False
+                    ),
+                    is_resubmission=bool(
+                        _json_load(submission.snapshot_json).get("redo", False)
+                    ),
+                )
             submission.grade_json = _json_dump(decision.model_dump(mode="json"))
             submission.status = "writing" if job.write_enabled else "dry_run_complete"
-            submission.status_message = "人工确认通过"
+            submission.status_message = (
+                "人工总分确认通过"
+                if update.manual_total_score is not None
+                else "人工确认通过"
+            )
             job_id = job.id
             write_enabled = job.write_enabled
         if write_enabled:
@@ -882,14 +909,15 @@ class JobService:
         ]
         if platform_ids and len(platform_ids) != len(rubric.criteria):
             raise RemoteSafetyError("平台分项评分映射不完整，已阻止写入")
-        score_by_criterion = {
-            item.criterion_id: item.score for item in decision.criterion_scores
-        }
-        for criterion in rubric.criteria:
-            if criterion.platform_score_attr_id:
-                score_attributes[criterion.platform_score_attr_id] = score_by_criterion[
-                    criterion.id
-                ]
+        if decision.criterion_scores:
+            score_by_criterion = {
+                item.criterion_id: item.score for item in decision.criterion_scores
+            }
+            for criterion in rubric.criteria:
+                if criterion.platform_score_attr_id:
+                    score_attributes[criterion.platform_score_attr_id] = (
+                        score_by_criterion[criterion.id]
+                    )
 
         self._update_submission(
             submission_id, status="writing", status_message="正在写入未发布成绩"
@@ -1321,6 +1349,49 @@ def _submission_fingerprint(detail: dict[str, Any]) -> str:
         stable, ensure_ascii=False, sort_keys=True, separators=(",", ":")
     ).encode("utf-8")
     return hashlib.sha256(encoded).hexdigest()
+
+
+def _manual_total_decision(
+    original: GradeDecision,
+    rubric: Rubric,
+    total: Decimal,
+) -> GradeDecision:
+    if total != total.to_integral_value():
+        raise JobError("手工总分必须为整数")
+    if total > rubric.total_score:
+        raise JobError(f"手工总分不能超过作业总分 {rubric.total_score}")
+
+    matched_band = next(
+        (
+            band
+            for band in rubric.score_bands
+            if (
+                band.min_score <= total < band.max_score
+                or (
+                    band.max_score == rubric.total_score
+                    and total == band.max_score
+                )
+            )
+        ),
+        None,
+    )
+    return original.model_copy(
+        deep=True,
+        update={
+            "criterion_scores": [],
+            "raw_score": total,
+            "final_score": total,
+            "detected_score_band_id": matched_band.id if matched_band else "",
+            "detected_score_band_name": (
+                matched_band.name if matched_band else ""
+            ),
+            "score_band_evidence": [f"教师手工直接给出总分 {total} 分"],
+            "confidence": 1,
+            "needs_review": False,
+            "review_reasons": [],
+            "adjustments": ["教师手工直接给出总分"],
+        },
+    )
 
 
 def _has_complete_grade(grade: dict[str, Any], rubric: Rubric) -> bool:

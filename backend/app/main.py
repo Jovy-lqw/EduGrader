@@ -170,6 +170,15 @@ async def get_job(job_id: str) -> JobView:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
 
+@app.delete("/api/jobs/{job_id}", response_model=ApiMessage)
+async def delete_job(job_id: str) -> ApiMessage:
+    try:
+        job_service.delete(job_id)
+    except JobError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    return ApiMessage(message="任务记录已删除")
+
+
 @app.post("/api/jobs/{job_id}/start", response_model=JobView)
 async def start_job(job_id: str) -> JobView:
     try:

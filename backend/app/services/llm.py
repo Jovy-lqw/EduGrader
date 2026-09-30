@@ -13,6 +13,7 @@ from ..schemas import (
     GradeCriterion,
     GradeDecision,
     Rubric,
+    RubricCriterion,
     RubricNormalizeRequest,
     RubricScoreBand,
 )
@@ -24,6 +25,46 @@ class LlmError(RuntimeError):
 
 class GradeValidationError(RuntimeError):
     pass
+
+
+def _merge_platform_criteria(
+    generated: Any,
+    platform_criteria: list[RubricCriterion],
+) -> list[dict[str, Any]]:
+    candidates = generated if isinstance(generated, list) else []
+    available = [
+        item for item in candidates
+        if isinstance(item, dict)
+    ]
+    merged: list[dict[str, Any]] = []
+    used: set[int] = set()
+    for expected in platform_criteria:
+        match_index = next(
+            (
+                index
+                for index, candidate in enumerate(available)
+                if index not in used
+                and (
+                    (
+                        expected.platform_score_attr_id
+                        and candidate.get("platform_score_attr_id")
+                        == expected.platform_score_attr_id
+                    )
+                    or candidate.get("id") == expected.id
+                    or candidate.get("name") == expected.name
+                )
+            ),
+            None,
+        )
+        result = expected.model_dump(mode="json")
+        if match_index is not None:
+            used.add(match_index)
+            candidate = available[match_index]
+            for field in ("description", "required_evidence", "deduction_rules"):
+                if candidate.get(field):
+                    result[field] = candidate[field]
+        merged.append(result)
+    return merged
 
 
 class LlmClient:
@@ -128,6 +169,12 @@ class LlmClient:
                     f"{prompt}{retry_note}",
                 )
                 payload["source_text"] = request.source_text
+                payload["total_score"] = request.total_score
+                if request.platform_criteria:
+                    payload["criteria"] = _merge_platform_criteria(
+                        payload.get("criteria"),
+                        request.platform_criteria,
+                    )
                 rubric = Rubric.model_validate(payload)
                 if request.platform_criteria:
                     expected = {
@@ -152,7 +199,14 @@ class LlmClient:
                     "不要返回 JSON Schema 定义，也不要把完整内容塞入 title；"
                     "请严格按上方完整顶层结构重新输出数据对象。"
                 )
-        raise LlmError(f"评分细则整理结果无效：{last_error}") from last_error
+        reason = (
+            "模型未返回有效评分项"
+            if isinstance(last_error, ValidationError)
+            else str(last_error or "模型返回格式不完整")
+        )
+        raise LlmError(
+            f"评分细则整理失败：{reason}。请重试，或先应用一个评分模板后再修改。"
+        ) from last_error
 
     async def grade(
         self,
@@ -384,8 +438,6 @@ class GradeValidator:
         decision.raw_score = raw_score
         decision.final_score = final_score
         decision.adjustments = adjustments
-        if not decision.feedback.strip():
-            raise GradeValidationError("模型未生成评语")
         return decision
 
 
@@ -707,16 +759,16 @@ def _normalize_score_band_decision(
         for item in rubric.score_bands
         if _score_in_band(raw_score, item.min_score, item.max_score, rubric)
     ]
-    if band is None:
-        if len(inferred) != 1:
-            return f"分项总分 {raw_score} 未落入任何已定义档位"
+    if len(inferred) != 1:
+        return f"分项总分 {raw_score} 未落入任何已定义档位"
+    if band is None or not _score_in_band(
+        raw_score,
+        band.min_score,
+        band.max_score,
+        rubric,
+    ):
         band = inferred[0]
         decision.detected_score_band_id = band.id
-    if not _score_in_band(raw_score, band.min_score, band.max_score, rubric):
-        return (
-            f"分项总分 {raw_score} 不在所选档位"
-            f"“{band.name}”的 {band.min_score}-{band.max_score} 分区间"
-        )
     decision.detected_score_band_name = band.name
     if not decision.score_band_evidence:
         decision.score_band_evidence = [
