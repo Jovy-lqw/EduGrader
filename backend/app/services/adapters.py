@@ -218,10 +218,18 @@ class ZhihuishuAdapter(PlatformAdapter):
             return_exceptions=True,
         )
         merged: dict[str, Any] = {}
+        errors: list[Exception] = []
         for payload in payloads:
             if isinstance(payload, dict):
                 merged.update(_unwrap_dict(payload))
+            elif isinstance(payload, AuthenticationRequired):
+                raise payload
+            elif isinstance(payload, Exception):
+                errors.append(payload)
         if not merged:
+            for error in errors:
+                if isinstance(error, AdapterError):
+                    raise error
             raise AdapterError("无法读取作业详情")
         homework = self._homework_from_record(course_id, merged)
         if not homework.id:
@@ -434,6 +442,14 @@ class ZhihuishuAdapter(PlatformAdapter):
         try:
             payload = json.loads(text)
         except json.JSONDecodeError as exc:
+            normalized = text.lower()
+            if (
+                "passport.zhihuishu.com/login" in normalized
+                or ("window.top.location" in normalized and "login" in normalized)
+            ):
+                raise AuthenticationRequired(
+                    "智慧树登录已失效，请重新登录后继续任务"
+                ) from exc
             raise AdapterError(f"平台接口返回了非 JSON 内容，HTTP {status}") from exc
         if status in (401, 403) or _is_login_timeout(payload):
             raise AuthenticationRequired("登录已失效，请在浏览器中重新登录")

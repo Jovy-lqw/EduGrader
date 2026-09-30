@@ -1,10 +1,40 @@
 from decimal import Decimal
 from unittest import IsolatedAsyncioTestCase
 
-from backend.app.services.adapters import ZhihuishuAdapter
+from backend.app.services.adapters import AuthenticationRequired, ZhihuishuAdapter
 
 
 class HomeworkListTests(IsolatedAsyncioTestCase):
+    async def test_login_redirect_is_reported_as_expired_session(self) -> None:
+        class RedirectSession:
+            async def request(self, *args, **kwargs):
+                return (
+                    200,
+                    {},
+                    (
+                        b"<script>window.top.location.href="
+                        b"'http://passport.zhihuishu.com/login?service=x';</script>"
+                    ),
+                )
+
+        adapter = ZhihuishuAdapter(RedirectSession())
+
+        with self.assertRaisesRegex(AuthenticationRequired, "登录已失效"):
+            await adapter._api_json("GET", "/example")
+
+    async def test_homework_detail_preserves_authentication_error(self) -> None:
+        class ExpiredAdapter(ZhihuishuAdapter):
+            def __init__(self) -> None:
+                pass
+
+            async def _api_json(self, method, path, *, params=None, form=None):
+                raise AuthenticationRequired("智慧树登录已失效")
+
+        adapter = ExpiredAdapter()
+
+        with self.assertRaisesRegex(AuthenticationRequired, "登录已失效"):
+            await adapter.get_homework("course", "homework")
+
     async def test_uses_platform_filters_and_reads_all_pages(self) -> None:
         class RecordingAdapter(ZhihuishuAdapter):
             def __init__(self) -> None:
