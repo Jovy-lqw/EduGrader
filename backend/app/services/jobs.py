@@ -83,6 +83,7 @@ class JobService:
     def __init__(self) -> None:
         self._tasks: dict[str, asyncio.Task[None]] = {}
         self._task_lock = asyncio.Lock()
+        self._write_lock = asyncio.Lock()
 
     def create(self, request: JobCreate) -> JobView:
         if request.write_enabled and request.rubric.total_score <= 0:
@@ -691,11 +692,47 @@ class JobService:
             self._prepare_submissions(job_id, students)
             self._set_job_status(job_id, "running")
 
-            for submission_id in self._pending_submission_ids(job_id):
-                if self._stop_requested(job_id):
-                    self._set_job_status(job_id, "paused")
-                    return
-                await self._process_one(job_id, submission_id, adapter, homework.description)
+            pending_ids = self._pending_submission_ids(job_id)
+            concurrency = min(
+                runtime_config_store.load().llm_concurrency,
+                len(pending_ids),
+            )
+            halt_event = asyncio.Event()
+            fatal_errors: list[Exception] = []
+            queue: asyncio.Queue[str] = asyncio.Queue()
+            for submission_id in pending_ids:
+                queue.put_nowait(submission_id)
+
+            async def worker() -> None:
+                while not halt_event.is_set() and not self._stop_requested(job_id):
+                    try:
+                        submission_id = queue.get_nowait()
+                    except asyncio.QueueEmpty:
+                        return
+                    try:
+                        await self._process_one(
+                            job_id,
+                            submission_id,
+                            adapter,
+                            homework.description,
+                            halt_event=halt_event,
+                        )
+                    except (AuthenticationRequired, PostWriteVerificationError) as exc:
+                        halt_event.set()
+                        fatal_errors.append(exc)
+                        return
+                    finally:
+                        queue.task_done()
+
+            if concurrency:
+                await asyncio.gather(
+                    *(worker() for _ in range(concurrency))
+                )
+            if fatal_errors:
+                raise fatal_errors[0]
+            if self._stop_requested(job_id):
+                self._set_job_status(job_id, "paused")
+                return
 
             self._refresh_job_state(job_id)
         except AuthenticationRequired as exc:
@@ -719,6 +756,8 @@ class JobService:
         submission_id: str,
         adapter: PlatformAdapter,
         homework_description: str,
+        *,
+        halt_event: Optional[asyncio.Event] = None,
     ) -> None:
         submission = self._submission_record(submission_id)
         try:
@@ -834,10 +873,30 @@ class JobService:
                     status_message="评分完成，试运行未写入",
                 )
             else:
-                await self._write_one(job_id, submission_id, adapter)
-        except AuthenticationRequired:
+                async with self._write_lock:
+                    if (
+                        (halt_event and halt_event.is_set())
+                        or self._stop_requested(job_id)
+                    ):
+                        self._update_submission(
+                            submission_id,
+                            status="pending",
+                            status_message="批次已停止，等待继续处理",
+                        )
+                        return
+                    await self._write_one(job_id, submission_id, adapter)
+        except AuthenticationRequired as exc:
+            if halt_event:
+                halt_event.set()
+            self._update_submission(
+                submission_id,
+                status="pending",
+                status_message=f"{exc}，等待重新登录后继续",
+            )
             raise
         except PostWriteVerificationError as exc:
+            if halt_event:
+                halt_event.set()
             self._update_submission(
                 submission_id, status="failed", status_message=str(exc)
             )

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import re
 from decimal import Decimal, ROUND_HALF_UP
@@ -68,6 +69,11 @@ def _merge_platform_criteria(
 
 
 class LlmClient:
+    def __init__(self) -> None:
+        self._request_lock: asyncio.Lock | None = None
+        self._request_loop: asyncio.AbstractEventLoop | None = None
+        self._last_request_at = 0.0
+
     async def normalize_rubric(self, request: RubricNormalizeRequest) -> Rubric:
         explicit_rubric = _parse_explicit_rubric(request)
         if explicit_rubric is not None:
@@ -336,6 +342,7 @@ E. 分档是完成度与质量锚点，不是人数配额。不得为了制造�
         api_key = runtime_config_store.get_api_key()
         if not api_key:
             raise LlmError("尚未配置大模型 API Key")
+        await self._wait_for_request_slot(config.llm_request_interval_seconds)
         url = f"{config.llm_base_url}/chat/completions"
         request_payload = {
             "model": config.llm_model,
@@ -376,6 +383,21 @@ E. 分档是完成度与质量锚点，不是人数配额。不得为了制造�
         except (KeyError, IndexError, TypeError, json.JSONDecodeError) as exc:
             raise LlmError("大模型响应缺少 choices[0].message.content") from exc
         return _parse_json_object(content)
+
+    async def _wait_for_request_slot(self, interval_seconds: float) -> None:
+        if interval_seconds <= 0:
+            return
+        loop = asyncio.get_running_loop()
+        if self._request_loop is not loop:
+            self._request_loop = loop
+            self._request_lock = asyncio.Lock()
+            self._last_request_at = 0.0
+        assert self._request_lock is not None
+        async with self._request_lock:
+            delay = self._last_request_at + interval_seconds - loop.time()
+            if delay > 0:
+                await asyncio.sleep(delay)
+            self._last_request_at = loop.time()
 
 
 class GradeValidator:

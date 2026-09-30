@@ -1,3 +1,4 @@
+import asyncio
 from decimal import Decimal
 from unittest import IsolatedAsyncioTestCase, TestCase
 from unittest.mock import AsyncMock
@@ -177,6 +178,20 @@ class RubricTests(TestCase):
 
 
 class LlmClientTests(IsolatedAsyncioTestCase):
+    async def test_spaces_concurrent_request_starts(self) -> None:
+        client = LlmClient()
+        starts: list[float] = []
+
+        async def reserve_slot() -> None:
+            await client._wait_for_request_slot(0.03)
+            starts.append(asyncio.get_running_loop().time())
+
+        await asyncio.gather(*(reserve_slot() for _ in range(3)))
+
+        self.assertEqual(len(starts), 3)
+        self.assertGreaterEqual(starts[1] - starts[0], 0.02)
+        self.assertGreaterEqual(starts[2] - starts[1], 0.02)
+
     async def test_explicit_six_section_rubric_is_parsed_locally(self) -> None:
         client = LlmClient()
         client._chat_json = AsyncMock()

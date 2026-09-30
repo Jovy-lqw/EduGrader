@@ -2518,6 +2518,8 @@ function SettingsView(props: {
         <div className="form-grid two-columns">
           <label><span>OpenAI 兼容地址</span><input value={form.llm_base_url} onChange={(event) => setForm({ ...form, llm_base_url: event.target.value })} /></label>
           <label><span>模型名称</span><input value={form.llm_model} onChange={(event) => setForm({ ...form, llm_model: event.target.value })} /></label>
+          <label><span>并发评分数</span><input type="number" min="1" value={form.llm_concurrency} onChange={(event) => setForm({ ...form, llm_concurrency: Number(event.target.value) })} /></label>
+          <label><span>请求间隔（秒）</span><input type="number" min="0" step="0.1" value={form.llm_request_interval_seconds} onChange={(event) => setForm({ ...form, llm_request_interval_seconds: Number(event.target.value) })} /></label>
           <label><span>最大输出 Token</span><input type="number" min="512" step="512" value={form.llm_max_output_tokens} onChange={(event) => setForm({ ...form, llm_max_output_tokens: Number(event.target.value) })} /></label>
           <label className="full-width">
             <span>API Key {form.llm_api_key_configured && <em>已配置</em>}</span>

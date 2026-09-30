@@ -8,6 +8,7 @@ from zipfile import ZipFile
 
 from backend.app.database import initialize_database, session_scope
 from backend.app.models import AuditEvent, GradingJob, Submission
+from backend.app.runtime_config import RuntimeConfig
 from backend.app.schemas import (
     GradeCriterion,
     GradeDecision,
@@ -105,6 +106,89 @@ class JobWorkflowTests(IsolatedAsyncioTestCase):
             self.assertIn("status_grading", event_types)
             self.assertIn("grade_generated", event_types)
             self.assertIn("status_written", event_types)
+
+    async def test_grades_concurrently_but_writes_serially(self) -> None:
+        class TrackingAdapter(MockAdapter):
+            def __init__(self) -> None:
+                super().__init__()
+                self.active_writes = 0
+                self.peak_writes = 0
+
+            async def write_grade(self, *args, **kwargs):
+                self.active_writes += 1
+                self.peak_writes = max(self.peak_writes, self.active_writes)
+                try:
+                    await asyncio.sleep(0.03)
+                    return await super().write_grade(*args, **kwargs)
+                finally:
+                    self.active_writes -= 1
+
+        rubric = Rubric(
+            total_score=Decimal("100"),
+            criteria=[
+                RubricCriterion(
+                    id="content",
+                    name="内容质量",
+                    max_score=Decimal("100"),
+                )
+            ],
+        )
+        job = self.service.create(
+            JobCreate(
+                course_id="demo-course",
+                homework_id="demo-homework",
+                rubric=rubric,
+            )
+        )
+        self.created_job_ids.append(job.id)
+        adapter = TrackingAdapter()
+        active_grades = 0
+        peak_grades = 0
+
+        async def fake_grade(*_args, **_kwargs) -> GradeDecision:
+            nonlocal active_grades, peak_grades
+            active_grades += 1
+            peak_grades = max(peak_grades, active_grades)
+            try:
+                await asyncio.sleep(0.05)
+                return GradeDecision(
+                    criterion_scores=[
+                        GradeCriterion(
+                            criterion_id="content",
+                            score=Decimal("88"),
+                        )
+                    ],
+                    raw_score=Decimal("88"),
+                    final_score=Decimal("88"),
+                    feedback="测试评语",
+                    confidence=0.9,
+                )
+            finally:
+                active_grades -= 1
+
+        with patch(
+            "backend.app.services.jobs.get_adapter",
+            return_value=adapter,
+        ), patch(
+            "backend.app.services.jobs.runtime_config_store.load",
+            return_value=RuntimeConfig(
+                adapter_mode="mock",
+                llm_concurrency=2,
+            ),
+        ), patch(
+            "backend.app.services.jobs.llm_client.grade",
+            side_effect=fake_grade,
+        ):
+            await self.service.start(job.id)
+            for _ in range(100):
+                current = self.service.get(job.id)
+                if current.status in {"completed", "failed"}:
+                    break
+                await asyncio.sleep(0.02)
+
+        self.assertEqual(self.service.get(job.id).status, "completed")
+        self.assertEqual(peak_grades, 2)
+        self.assertEqual(adapter.peak_writes, 1)
 
     async def test_stops_batch_when_platform_publishes_after_write(self) -> None:
         class AutoPublishingAdapter(MockAdapter):

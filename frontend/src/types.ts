@@ -7,6 +7,8 @@ export type SessionStatus = {
 export type RuntimeConfig = {
   llm_base_url: string;
   llm_model: string;
+  llm_concurrency: number;
+  llm_request_interval_seconds: number;
   request_timeout_seconds: number;
   llm_max_output_tokens: number;
   max_pdf_megabytes: number;
