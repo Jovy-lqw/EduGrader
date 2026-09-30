@@ -1,4 +1,5 @@
 import json
+import os
 import stat
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -45,10 +46,11 @@ class BrowserSessionStateTests(IsolatedAsyncioTestCase):
             ):
                 await session.persist_state()
                 self.assertEqual(json.loads(path.read_text()), state)
-                self.assertEqual(
-                    stat.S_IMODE(path.stat().st_mode),
-                    0o600,
-                )
+                if os.name != "nt":
+                    self.assertEqual(
+                        stat.S_IMODE(path.stat().st_mode),
+                        0o600,
+                    )
 
                 restored = Context()
                 await session._restore_state(restored)

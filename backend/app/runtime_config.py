@@ -8,6 +8,7 @@ from typing import Literal, Optional
 from pydantic import BaseModel, Field, field_validator
 
 from .config import settings
+from .file_utils import set_file_mode
 
 
 class RuntimeConfig(BaseModel):
@@ -93,7 +94,7 @@ class RuntimeConfigStore:
             with os.fdopen(fd, "w", encoding="utf-8") as handle:
                 json.dump(payload, handle, ensure_ascii=False, indent=2)
                 handle.write("\n")
-            os.chmod(temp_name, mode)
+            set_file_mode(Path(temp_name), mode)
             os.replace(temp_name, path)
         finally:
             if os.path.exists(temp_name):

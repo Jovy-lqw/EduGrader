@@ -28,20 +28,13 @@ cd ..
 
 ### Windows
 
-打开 PowerShell 或命令提示符，进入项目根目录后执行：
+打开 PowerShell，进入项目根目录后执行：
 
 ```powershell
-py -3 -m venv .venv
-.\.venv\Scripts\python.exe -m pip install -r requirements.txt
-.\.venv\Scripts\python.exe -m playwright install chromium
-
-cd frontend
-npm install
-npm run build
-cd ..
+powershell -ExecutionPolicy Bypass -File .\setup.ps1
 ```
 
-如果没有 `py -3` 命令，可将它替换为 `python`。
+脚本会创建虚拟环境、安装后端和 Chromium，并构建前端。
 
 ## 启动
 
@@ -70,7 +63,8 @@ http://127.0.0.1:8000
 1. 打开“系统配置”。
 2. 选择“智慧树”运行模式。
 3. 填写 OpenAI 兼容地址、模型名称和 API Key。
-4. 点击“保存配置”。
+4. 按模型服务限额设置并发评分数和请求间隔。
+5. 点击“保存配置”。
 
 首次使用可先选择“本地演示”熟悉页面和操作。
 
@@ -124,6 +118,16 @@ http://127.0.0.1:8000
 在任务详情右上角点击“删除任务”。运行中的任务需要先暂停。
 
 删除只会移除本机任务记录，不会撤销已经写入智慧树的成绩。
+
+## 本地数据位置
+
+- Windows：`%LOCALAPPDATA%\EduGrader`
+- macOS：项目目录下的 `data`、`browser-profile` 和 `downloads`
+
+从旧版 Windows 升级时，如项目目录下已有 `data` 或 `browser-profile`，
+请在首次启动新版前将它们复制到 `%LOCALAPPDATA%\EduGrader` 下。也可通过
+`EDUGRADER_DATA_DIR`、`EDUGRADER_BROWSER_PROFILE_DIR` 和
+`EDUGRADER_DOWNLOAD_DIR` 自定义位置。
 
 ## 扫描版 PDF
 

@@ -1,10 +1,12 @@
 import asyncio
 from decimal import Decimal
 from unittest import IsolatedAsyncioTestCase, TestCase
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, call, patch
 
+import httpx
 from pydantic import ValidationError
 
+from backend.app.runtime_config import RuntimeConfig
 from backend.app.schemas import (
     GradeCriterion,
     GradeDecision,
@@ -191,6 +193,112 @@ class LlmClientTests(IsolatedAsyncioTestCase):
         self.assertEqual(len(starts), 3)
         self.assertGreaterEqual(starts[1] - starts[0], 0.02)
         self.assertGreaterEqual(starts[2] - starts[1], 0.02)
+
+    async def test_reuses_http_client_across_requests(self) -> None:
+        request_count = 0
+
+        async def handler(_request: httpx.Request) -> httpx.Response:
+            nonlocal request_count
+            request_count += 1
+            return httpx.Response(
+                200,
+                json={
+                    "choices": [
+                        {"message": {"content": '{"result": "ok"}'}}
+                    ]
+                },
+            )
+
+        http_client = httpx.AsyncClient(
+            transport=httpx.MockTransport(handler)
+        )
+        client = LlmClient(http_client)
+        config = RuntimeConfig(adapter_mode="mock")
+        try:
+            with patch(
+                "backend.app.services.llm.runtime_config_store.load",
+                return_value=config,
+            ), patch(
+                "backend.app.services.llm.runtime_config_store.get_api_key",
+                return_value="test-key",
+            ):
+                await client._chat_json("system", "first")
+                await client._chat_json("system", "second")
+        finally:
+            await client.close()
+
+        self.assertEqual(request_count, 2)
+        self.assertTrue(http_client.is_closed)
+
+    async def test_retries_rate_limits_and_server_errors(self) -> None:
+        responses = [
+            httpx.Response(429, headers={"Retry-After": "0"}, text="limited"),
+            httpx.Response(503, text="unavailable"),
+            httpx.Response(
+                200,
+                json={
+                    "choices": [
+                        {"message": {"content": '{"result": "ok"}'}}
+                    ]
+                },
+            ),
+        ]
+
+        async def handler(_request: httpx.Request) -> httpx.Response:
+            return responses.pop(0)
+
+        client = LlmClient(
+            httpx.AsyncClient(transport=httpx.MockTransport(handler))
+        )
+        client._sleep = AsyncMock()
+        config = RuntimeConfig(adapter_mode="mock")
+        try:
+            with patch(
+                "backend.app.services.llm.runtime_config_store.load",
+                return_value=config,
+            ), patch(
+                "backend.app.services.llm.runtime_config_store.get_api_key",
+                return_value="test-key",
+            ), patch.object(
+                client,
+                "_backoff_seconds",
+                return_value=0.75,
+            ):
+                result = await client._chat_json("system", "user")
+        finally:
+            await client.close()
+
+        self.assertEqual(result, {"result": "ok"})
+        self.assertEqual(client._sleep.await_args_list, [call(0), call(0.75)])
+
+    async def test_does_not_retry_other_client_errors(self) -> None:
+        request_count = 0
+
+        async def handler(_request: httpx.Request) -> httpx.Response:
+            nonlocal request_count
+            request_count += 1
+            return httpx.Response(400, text="bad request")
+
+        client = LlmClient(
+            httpx.AsyncClient(transport=httpx.MockTransport(handler))
+        )
+        client._sleep = AsyncMock()
+        config = RuntimeConfig(adapter_mode="mock")
+        try:
+            with patch(
+                "backend.app.services.llm.runtime_config_store.load",
+                return_value=config,
+            ), patch(
+                "backend.app.services.llm.runtime_config_store.get_api_key",
+                return_value="test-key",
+            ):
+                with self.assertRaisesRegex(LlmError, "HTTP 400"):
+                    await client._chat_json("system", "user")
+        finally:
+            await client.close()
+
+        self.assertEqual(request_count, 1)
+        client._sleep.assert_not_awaited()
 
     async def test_explicit_six_section_rubric_is_parsed_locally(self) -> None:
         client = LlmClient()

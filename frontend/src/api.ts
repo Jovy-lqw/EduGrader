@@ -131,6 +131,11 @@ export const api = {
       `/api/submissions/${encodeURIComponent(submissionId)}/manual-review`,
       { method: "POST" },
     ),
+  cancelManualReview: (submissionId: string) =>
+    request<Submission>(
+      `/api/submissions/${encodeURIComponent(submissionId)}/manual-review`,
+      { method: "DELETE" },
+    ),
   approveSubmission: (
     submissionId: string,
     grade: GradeDecision,

@@ -7,7 +7,7 @@ import shutil
 from dataclasses import dataclass
 from io import BytesIO
 from pathlib import Path
-from typing import Any
+from typing import Any, Awaitable, Callable, Optional
 from zipfile import BadZipFile, ZipFile
 
 from pypdf import PdfReader
@@ -40,8 +40,12 @@ class PdfProcessor:
         job_id: str,
         student_id: str,
         files: list[dict[str, Any]],
+        download_file: Optional[
+            Callable[[str], Awaitable[tuple[bytes, str]]]
+        ] = None,
     ) -> ParsedDocuments:
         config = runtime_config_store.load()
+        downloader = download_file or adapter.download_file
         candidates: list[dict[str, Any]] = []
         zip_candidates: list[dict[str, Any]] = []
         ignored: list[dict[str, Any]] = []
@@ -59,7 +63,7 @@ class PdfProcessor:
             )
         elif zip_candidates:
             candidates, zip_ignored = await self._documents_from_zips(
-                adapter,
+                downloader,
                 zip_candidates,
                 config.max_pdf_megabytes * 1024 * 1024,
             )
@@ -87,7 +91,7 @@ class PdfProcessor:
                     body = embedded_body
                     response_content_type = str(file.get("content_type") or "")
                 else:
-                    body, response_content_type = await adapter.download_file(
+                    body, response_content_type = await downloader(
                         str(file.get("url") or "")
                     )
                 if len(body) > config.max_pdf_megabytes * 1024 * 1024:
@@ -249,7 +253,7 @@ class PdfProcessor:
 
     async def _documents_from_zips(
         self,
-        adapter: PlatformAdapter,
+        download_file: Callable[[str], Awaitable[tuple[bytes, str]]],
         zip_files: list[dict[str, Any]],
         max_bytes: int,
     ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
@@ -258,7 +262,7 @@ class PdfProcessor:
         total_document_bytes = 0
         seen_document_hashes: set[str] = set()
         for zip_file in zip_files:
-            body, _ = await adapter.download_file(str(zip_file.get("url") or ""))
+            body, _ = await download_file(str(zip_file.get("url") or ""))
             if len(body) > max_bytes:
                 ignored.append(
                     {**zip_file, "ignored_reason": "压缩包超过大小限制"}

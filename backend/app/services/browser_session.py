@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-import os
 from typing import Any, Optional
 from urllib.parse import unquote
 
@@ -14,6 +13,7 @@ from playwright.async_api import (
 )
 
 from ..config import settings
+from ..file_utils import set_file_mode
 
 
 TEACHER_HOME_URL = (
@@ -77,7 +77,7 @@ class BrowserSession:
             json.dumps(state, ensure_ascii=False),
             encoding="utf-8",
         )
-        os.chmod(temporary_path, 0o600)
+        set_file_mode(temporary_path, 0o600)
         temporary_path.replace(SESSION_STATE_PATH)
 
     async def request(

@@ -83,6 +83,7 @@ class JobService:
     def __init__(self) -> None:
         self._tasks: dict[str, asyncio.Task[None]] = {}
         self._task_lock = asyncio.Lock()
+        self._platform_lock = asyncio.Lock()
         self._write_lock = asyncio.Lock()
 
     def create(self, request: JobCreate) -> JobView:
@@ -324,7 +325,8 @@ class JobService:
             )
             if not archive_file:
                 raise JobError("原始 ZIP 附件地址已丢失")
-            archive_body, _ = await adapter.download_file(
+            archive_body, _ = await self._download_file(
+                adapter,
                 str(archive_file.get("url") or "")
             )
             if len(archive_body) > max_bytes:
@@ -339,7 +341,10 @@ class JobService:
             except (BadZipFile, KeyError) as exc:
                 raise JobError("无法从原始 ZIP 中读取 PDF") from exc
         else:
-            body, _ = await adapter.download_file(str(pdf_file.get("url") or ""))
+            body, _ = await self._download_file(
+                adapter,
+                str(pdf_file.get("url") or ""),
+            )
 
         if len(body) > max_bytes:
             raise JobError("原始 PDF 超过大小限制")
@@ -491,13 +496,18 @@ class JobService:
             student_id = submission.student_id
             previous_status = submission.status
             previous_message = submission.status_message
+            previous_grade = _json_load(submission.grade_json)
             selected_files = _json_load(submission.pdf_files_json)
             ignored_files = _json_load(submission.ignored_files_json)
             extracted_text = submission.extracted_text
             rubric = Rubric.model_validate_json(job.rubric_json)
             grade = _json_load(submission.grade_json)
 
-        detail = await adapter.get_submission(homework_id, student_id)
+        detail = await self._get_submission(
+            adapter,
+            homework_id,
+            student_id,
+        )
         if _is_published(detail.get("publish_state")):
             raise JobError("当前成绩已发布，不能转为手工评分")
 
@@ -509,6 +519,7 @@ class JobService:
                     job_id=job_id,
                     student_id=student_id,
                     files=list(detail.get("files") or []),
+                    download_file=lambda url: self._download_file(adapter, url),
                 )
                 selected_files = documents.selected_files
                 ignored_files = documents.ignored_files
@@ -554,6 +565,56 @@ class JobService:
                 {
                     "previous_status": previous_status,
                     "previous_message": previous_message,
+                    "previous_grade": previous_grade,
+                },
+            )
+        self._refresh_job_state(job_id)
+        return self._get_submission_view(submission_id)
+
+    def cancel_manual_review(self, submission_id: str) -> SubmissionView:
+        with session_scope() as db:
+            submission = db.get(Submission, submission_id)
+            if not submission:
+                raise JobError("学生批阅记录不存在")
+            job = db.get(GradingJob, submission.job_id)
+            if not job:
+                raise JobError("任务不存在")
+            if job.status in ACTIVE_JOB_STATUSES:
+                raise JobError("任务仍在运行，不能取消手工评分")
+            if submission.status != "waiting_confirmation":
+                raise JobError("该记录当前不在手工评分状态")
+            event = db.scalars(
+                select(AuditEvent)
+                .where(
+                    AuditEvent.submission_id == submission_id,
+                    AuditEvent.event_type.in_(
+                        ["manual_review_started", "manual_review_cancelled"]
+                    ),
+                )
+                .order_by(AuditEvent.created_at.desc())
+            ).first()
+            if not event or event.event_type != "manual_review_started":
+                raise JobError("该记录不是由手工评分转换而来")
+            detail = _json_load(event.detail_json)
+            previous_status = str(detail.get("previous_status") or "")
+            if not previous_status or previous_status == "waiting_confirmation":
+                raise JobError("找不到转换前状态，无法取消手工评分")
+            previous_message = str(detail.get("previous_message") or "")
+            submission.status = previous_status
+            submission.status_message = previous_message
+            previous_grade = detail.get("previous_grade")
+            if isinstance(previous_grade, dict):
+                submission.grade_json = _json_dump(previous_grade)
+            job_id = job.id
+            self._add_audit(
+                db,
+                job_id,
+                submission.id,
+                "manual_review_cancelled",
+                "已取消手工评分并恢复原状态",
+                {
+                    "restored_status": previous_status,
+                    "restored_message": previous_message,
                 },
             )
         self._refresh_job_state(job_id)
@@ -602,7 +663,8 @@ class JobService:
             write_enabled = job.write_enabled
         if write_enabled:
             try:
-                await self._write_one(job_id, submission_id, get_adapter())
+                async with self._write_lock:
+                    await self._write_one(job_id, submission_id, get_adapter())
             except PostWriteVerificationError as exc:
                 self._update_submission(
                     submission_id, status="failed", status_message=str(exc)
@@ -668,9 +730,10 @@ class JobService:
         adapter = get_adapter()
         try:
             job_view = self.get(job_id)
-            homework = await adapter.get_homework(
-                job_view.course_id, job_view.homework_id
-            )
+            async with self._platform_lock:
+                homework = await adapter.get_homework(
+                    job_view.course_id, job_view.homework_id
+                )
             if job_view.write_enabled and homework.auto_publish is not False:
                 reason = (
                     "智慧树当前作业已开启自动发布"
@@ -681,11 +744,12 @@ class JobService:
                     f"{reason}。请先在网站确认关闭自动发布后重试。"
                 )
             scope = job_view.scope
-            students = await adapter.list_students(
-                job_view.homework_id,
-                class_id=str(scope.get("class_id") or ""),
-                status=str(scope.get("status") or "unreviewed"),
-            )
+            async with self._platform_lock:
+                students = await adapter.list_students(
+                    job_view.homework_id,
+                    class_id=str(scope.get("class_id") or ""),
+                    status=str(scope.get("status") or "unreviewed"),
+                )
             selected_ids = set(scope.get("student_ids") or [])
             if selected_ids:
                 students = [student for student in students if student.id in selected_ids]
@@ -767,8 +831,10 @@ class JobService:
                 status_message="正在读取学生提交",
                 increment_attempt=True,
             )
-            detail = await adapter.get_submission(
-                submission["homework_id"], submission["student_id"]
+            detail = await self._get_submission(
+                adapter,
+                submission["homework_id"],
+                submission["student_id"],
             )
             snapshot_hash = _submission_fingerprint(detail)
             self._update_submission(
@@ -795,6 +861,7 @@ class JobService:
                 job_id=job_id,
                 student_id=submission["student_id"],
                 files=list(detail.get("files") or []),
+                download_file=lambda url: self._download_file(adapter, url),
             )
             self._update_submission(
                 submission_id,
@@ -932,7 +999,33 @@ class JobService:
         finally:
             self._refresh_counts(job_id)
 
+    async def _get_submission(
+        self,
+        adapter: PlatformAdapter,
+        homework_id: str,
+        student_id: str,
+    ) -> dict[str, Any]:
+        async with self._platform_lock:
+            return await adapter.get_submission(homework_id, student_id)
+
+    async def _download_file(
+        self,
+        adapter: PlatformAdapter,
+        url: str,
+    ) -> tuple[bytes, str]:
+        async with self._platform_lock:
+            return await adapter.download_file(url)
+
     async def _write_one(
+        self,
+        job_id: str,
+        submission_id: str,
+        adapter: PlatformAdapter,
+    ) -> None:
+        async with self._platform_lock:
+            await self._write_one_locked(job_id, submission_id, adapter)
+
+    async def _write_one_locked(
         self,
         job_id: str,
         submission_id: str,

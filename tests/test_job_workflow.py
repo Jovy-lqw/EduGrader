@@ -111,15 +111,40 @@ class JobWorkflowTests(IsolatedAsyncioTestCase):
         class TrackingAdapter(MockAdapter):
             def __init__(self) -> None:
                 super().__init__()
+                self.active_platform_calls = 0
+                self.peak_platform_calls = 0
                 self.active_writes = 0
                 self.peak_writes = 0
+
+            async def _track_platform_call(self, operation):
+                self.active_platform_calls += 1
+                self.peak_platform_calls = max(
+                    self.peak_platform_calls,
+                    self.active_platform_calls,
+                )
+                try:
+                    await asyncio.sleep(0.02)
+                    return await operation
+                finally:
+                    self.active_platform_calls -= 1
+
+            async def get_submission(self, *args, **kwargs):
+                return await self._track_platform_call(
+                    super().get_submission(*args, **kwargs)
+                )
+
+            async def download_file(self, *args, **kwargs):
+                return await self._track_platform_call(
+                    super().download_file(*args, **kwargs)
+                )
 
             async def write_grade(self, *args, **kwargs):
                 self.active_writes += 1
                 self.peak_writes = max(self.peak_writes, self.active_writes)
                 try:
-                    await asyncio.sleep(0.03)
-                    return await super().write_grade(*args, **kwargs)
+                    return await self._track_platform_call(
+                        super().write_grade(*args, **kwargs)
+                    )
                 finally:
                     self.active_writes -= 1
 
@@ -188,6 +213,7 @@ class JobWorkflowTests(IsolatedAsyncioTestCase):
 
         self.assertEqual(self.service.get(job.id).status, "completed")
         self.assertEqual(peak_grades, 2)
+        self.assertEqual(adapter.peak_platform_calls, 1)
         self.assertEqual(adapter.peak_writes, 1)
 
     async def test_stops_batch_when_platform_publishes_after_write(self) -> None:
@@ -420,6 +446,58 @@ class JobWorkflowTests(IsolatedAsyncioTestCase):
         )
         self.assertEqual(approved.status, "dry_run_complete")
         self.assertEqual(approved.grade["final_score"], "88.0")
+
+    async def test_cancels_manual_review_and_restores_previous_state(self) -> None:
+        rubric = Rubric(
+            total_score=Decimal("100"),
+            criteria=[
+                RubricCriterion(
+                    id="content",
+                    name="内容质量",
+                    max_score=Decimal("100"),
+                )
+            ],
+        )
+        job = self.service.create(
+            JobCreate(
+                course_id="demo-course",
+                homework_id="demo-homework",
+                rubric=rubric,
+                write_enabled=False,
+            )
+        )
+        self.created_job_ids.append(job.id)
+        with session_scope() as db:
+            submission = Submission(
+                job_id=job.id,
+                student_id="manual-cancel",
+                status="failed",
+                status_message="大模型请求超时（120 秒）",
+                grade_json=json.dumps({"partial_result": "保留原数据"}),
+            )
+            db.add(submission)
+            db.flush()
+            submission_id = submission.id
+
+        prepared = await self.service.begin_manual_review(
+            submission_id,
+            MockAdapter(),
+        )
+        self.assertEqual(prepared.status, "waiting_confirmation")
+
+        restored = self.service.cancel_manual_review(submission_id)
+
+        self.assertEqual(restored.status, "failed")
+        self.assertEqual(restored.status_message, "大模型请求超时（120 秒）")
+        self.assertEqual(restored.grade, {"partial_result": "保留原数据"})
+        self.assertEqual(
+            restored.events[-1].event_type,
+            "manual_review_cancelled",
+        )
+        self.assertEqual(self.service.get(job.id).status, "completed")
+
+        with self.assertRaisesRegex(JobError, "当前不在手工评分状态"):
+            self.service.cancel_manual_review(submission_id)
 
     async def test_manual_review_can_approve_with_total_score_only(self) -> None:
         rubric = Rubric(

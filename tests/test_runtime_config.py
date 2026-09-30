@@ -1,7 +1,9 @@
+import os
 import tempfile
 from pathlib import Path
 from unittest import TestCase
 
+from backend.app.config import ROOT_DIR, _default_storage_root
 from backend.app.runtime_config import (
     RuntimeConfigStore,
     RuntimeConfigUpdate,
@@ -23,8 +25,9 @@ class RuntimeConfigStoreTests(TestCase):
             self.assertEqual(public.adapter_mode, "mock")
             self.assertFalse(hasattr(public, "llm_api_key"))
             self.assertEqual(store.get_api_key(), "secret-value")
-            mode = (Path(directory) / "secrets.json").stat().st_mode & 0o777
-            self.assertEqual(mode, 0o600)
+            if os.name != "nt":
+                mode = (Path(directory) / "secrets.json").stat().st_mode & 0o777
+                self.assertEqual(mode, 0o600)
 
     def test_uses_default_concurrency_for_existing_config(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -38,3 +41,20 @@ class RuntimeConfigStoreTests(TestCase):
 
             self.assertEqual(config.llm_concurrency, 3)
             self.assertEqual(config.llm_request_interval_seconds, 0)
+
+    def test_uses_local_app_data_on_windows(self) -> None:
+        root = _default_storage_root(
+            platform_name="nt",
+            local_app_data=r"C:\Users\teacher\AppData\Local",
+        )
+
+        self.assertEqual(
+            root,
+            Path(r"C:\Users\teacher\AppData\Local") / "EduGrader",
+        )
+
+    def test_keeps_project_storage_on_non_windows(self) -> None:
+        self.assertEqual(
+            _default_storage_root(platform_name="posix"),
+            ROOT_DIR,
+        )

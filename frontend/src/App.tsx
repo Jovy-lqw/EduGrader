@@ -2174,6 +2174,21 @@ function ReviewDialog(props: {
     }
   };
 
+  const cancelManualReview = async () => {
+    if (!window.confirm("取消后将恢复转换前的状态和原因，确定继续吗？")) {
+      return;
+    }
+    setBusy(true);
+    try {
+      await api.cancelManualReview(props.submission.id);
+      await props.onDone();
+    } catch (error) {
+      props.onError(errorMessage(error));
+    } finally {
+      setBusy(false);
+    }
+  };
+
   return (
     <div className="dialog-backdrop" role="presentation" onMouseDown={requestClose}>
       <div className={`review-dialog ${showReport ? "review-dialog-report-open" : ""}`} role="dialog" aria-modal="true" aria-labelledby="submission-detail-title" onMouseDown={(event) => event.stopPropagation()}>
@@ -2437,6 +2452,15 @@ function ReviewDialog(props: {
           </button>
           {canReview ? (
             <>
+              {props.manualReview && (
+                <button
+                  className="secondary-button"
+                  disabled={busy}
+                  onClick={() => void cancelManualReview()}
+                >
+                  <RotateCcw size={16} />取消手工评分
+                </button>
+              )}
               <button className="danger-button" disabled={busy} onClick={() => void reject()}>
                 {props.manualReview
                   ? "拒绝并标记不写入"

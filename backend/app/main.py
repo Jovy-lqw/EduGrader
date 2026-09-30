@@ -43,6 +43,7 @@ async def lifespan(_app: FastAPI):
     job_service.recover_interrupted_jobs()
     job_service.migrate_legacy_model_reviews()
     yield
+    await llm_client.close()
     await browser_session.close()
 
 
@@ -217,6 +218,17 @@ async def begin_manual_review(submission_id: str) -> SubmissionView:
             get_adapter(),
         )
     except (JobError, AdapterError) as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+@app.delete(
+    "/api/submissions/{submission_id}/manual-review",
+    response_model=SubmissionView,
+)
+async def cancel_manual_review(submission_id: str) -> SubmissionView:
+    try:
+        return job_service.cancel_manual_review(submission_id)
+    except JobError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
 
 

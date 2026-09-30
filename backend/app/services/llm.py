@@ -2,9 +2,12 @@ from __future__ import annotations
 
 import asyncio
 import json
+import random
 import re
+from datetime import datetime, timezone
 from decimal import Decimal, ROUND_HALF_UP
-from typing import Any
+from email.utils import parsedate_to_datetime
+from typing import Any, Awaitable, Callable, Optional
 
 import httpx
 from pydantic import ValidationError
@@ -69,10 +72,20 @@ def _merge_platform_criteria(
 
 
 class LlmClient:
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        http_client: Optional[httpx.AsyncClient] = None,
+    ) -> None:
         self._request_lock: asyncio.Lock | None = None
         self._request_loop: asyncio.AbstractEventLoop | None = None
         self._last_request_at = 0.0
+        self._http_client = http_client
+        self._sleep: Callable[[float], Awaitable[None]] = asyncio.sleep
+
+    async def close(self) -> None:
+        if self._http_client and not self._http_client.is_closed:
+            await self._http_client.aclose()
+        self._http_client = None
 
     async def normalize_rubric(self, request: RubricNormalizeRequest) -> Rubric:
         explicit_rubric = _parse_explicit_rubric(request)
@@ -342,7 +355,6 @@ E. 分档是完成度与质量锚点，不是人数配额。不得为了制造�
         api_key = runtime_config_store.get_api_key()
         if not api_key:
             raise LlmError("尚未配置大模型 API Key")
-        await self._wait_for_request_slot(config.llm_request_interval_seconds)
         url = f"{config.llm_base_url}/chat/completions"
         request_payload = {
             "model": config.llm_model,
@@ -354,10 +366,13 @@ E. 分档是完成度与质量锚点，不是人数配额。不得为了制造�
                 {"role": "user", "content": user_prompt},
             ],
         }
-        try:
-            async with httpx.AsyncClient(
-                timeout=config.request_timeout_seconds
-            ) as client:
+        response: httpx.Response
+        for attempt in range(3):
+            await self._wait_for_request_slot(
+                config.llm_request_interval_seconds
+            )
+            try:
+                client = self._get_http_client()
                 response = await client.post(
                     url,
                     headers={
@@ -365,24 +380,70 @@ E. 分档是完成度与质量锚点，不是人数配额。不得为了制造�
                         "Content-Type": "application/json",
                     },
                     json=request_payload,
+                    timeout=config.request_timeout_seconds,
                 )
-        except httpx.TimeoutException as exc:
-            raise LlmError(
-                f"大模型请求超时（{config.request_timeout_seconds} 秒）"
-            ) from exc
-        except httpx.RequestError as exc:
-            detail = str(exc).strip() or exc.__class__.__name__
-            raise LlmError(f"大模型请求失败：{detail}") from exc
-        if response.status_code < 200 or response.status_code >= 300:
+            except httpx.TimeoutException as exc:
+                raise LlmError(
+                    f"大模型请求超时（{config.request_timeout_seconds} 秒）"
+                ) from exc
+            except httpx.RequestError as exc:
+                detail = str(exc).strip() or exc.__class__.__name__
+                raise LlmError(f"大模型请求失败：{detail}") from exc
+
+            if 200 <= response.status_code < 300:
+                break
+            if (
+                response.status_code == 429
+                or response.status_code >= 500
+            ) and attempt < 2:
+                retry_after = self._retry_after_seconds(
+                    response.headers.get("Retry-After")
+                )
+                delay = (
+                    retry_after
+                    if retry_after is not None
+                    else self._backoff_seconds(attempt)
+                )
+                await self._sleep(delay)
+                continue
             detail = response.text[:300]
             raise LlmError(
                 f"大模型返回 HTTP {response.status_code}：{detail}"
             )
+
         try:
             content = response.json()["choices"][0]["message"]["content"]
         except (KeyError, IndexError, TypeError, json.JSONDecodeError) as exc:
             raise LlmError("大模型响应缺少 choices[0].message.content") from exc
         return _parse_json_object(content)
+
+    def _get_http_client(self) -> httpx.AsyncClient:
+        if self._http_client is None or self._http_client.is_closed:
+            self._http_client = httpx.AsyncClient()
+        return self._http_client
+
+    @staticmethod
+    def _backoff_seconds(attempt: int) -> float:
+        return (2 ** attempt) + random.random() * 0.25
+
+    @staticmethod
+    def _retry_after_seconds(value: Optional[str]) -> Optional[float]:
+        if not value:
+            return None
+        try:
+            return max(0.0, float(value))
+        except ValueError:
+            pass
+        try:
+            retry_at = parsedate_to_datetime(value)
+        except (TypeError, ValueError, OverflowError):
+            return None
+        if retry_at.tzinfo is None:
+            retry_at = retry_at.replace(tzinfo=timezone.utc)
+        return max(
+            0.0,
+            (retry_at - datetime.now(timezone.utc)).total_seconds(),
+        )
 
     async def _wait_for_request_slot(self, interval_seconds: float) -> None:
         if interval_seconds <= 0:
